@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { cleanEnv } from './env-utils.js';
 import { processManager } from './process-manager.js';
 import type { RunOptions, RunResult, StreamCallbacks } from './agent-runner.js';
 import { mergeTexts } from './agent-runner.js';
@@ -81,6 +82,7 @@ export class ClaudeCodeRunner {
       const proc = spawn('claude', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
+        env: cleanEnv(),
       });
 
       // プロセスマネージャーに登録
@@ -184,6 +186,7 @@ export class ClaudeCodeRunner {
       const proc = spawn('claude', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
+        env: cleanEnv(),
       });
 
       // プロセスマネージャーに登録

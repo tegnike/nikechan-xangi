@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from 'child_process';
+import { cleanEnv } from './env-utils.js';
 import { EventEmitter } from 'events';
 import type { RunOptions, RunResult, StreamCallbacks, AgentRunner } from './agent-runner.js';
 import { mergeTexts } from './agent-runner.js';
@@ -111,6 +112,7 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     this.process = spawn('claude', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.workdir,
+      env: cleanEnv(),
     });
     this.processAlive = true;
 
