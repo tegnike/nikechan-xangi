@@ -120,7 +120,12 @@ async function main() {
   });
 
   // エージェントランナーを作成
-  const agentRunner = createAgentRunner(config.agent.backend, config.agent.config);
+  const agentRunner = createAgentRunner(config.agent.backend, config.agent.config, {
+    onAutoCompact: (channelId) => {
+      deleteSession(channelId);
+      console.log(`[xangi] Auto-compact: session reset for channel ${channelId}`);
+    },
+  });
   const backendName = getBackendDisplayName(config.agent.backend);
   console.log(`[xangi] Using ${backendName} as agent backend`);
 

@@ -13,6 +13,12 @@ export interface AgentConfig {
   maxProcesses?: number;
   /** アイドルタイムアウト（ミリ秒、RunnerManager用） */
   idleTimeoutMs?: number;
+  /** 自動コンパクト: アイドル時間閾値（ミリ秒、デフォルト3時間） */
+  autoCompactIdleMs?: number;
+  /** 自動コンパクト: トークン数閾値（デフォルト50000） */
+  autoCompactTokenThreshold?: number;
+  /** 新規セッション開始時にClaudeに送る指示文 */
+  sessionInitPrompt?: string;
 }
 
 export interface Config {
@@ -78,6 +84,13 @@ export function loadConfig(): Config {
     idleTimeoutMs: process.env.IDLE_TIMEOUT_MS
       ? parseInt(process.env.IDLE_TIMEOUT_MS, 10)
       : 30 * 60 * 1000, // 30分
+    autoCompactIdleMs: process.env.AUTO_COMPACT_IDLE_MS
+      ? parseInt(process.env.AUTO_COMPACT_IDLE_MS, 10)
+      : 3 * 60 * 60 * 1000, // 3時間
+    autoCompactTokenThreshold: process.env.AUTO_COMPACT_TOKEN_THRESHOLD
+      ? parseInt(process.env.AUTO_COMPACT_TOKEN_THRESHOLD, 10)
+      : 50000,
+    sessionInitPrompt: process.env.SESSION_INIT_PROMPT || undefined,
   };
 
   return {

@@ -33,10 +33,19 @@ export interface AgentRunner {
   destroy?(channelId: string): boolean;
 }
 
+export interface CreateAgentRunnerOptions {
+  /** 自動コンパクト時のコールバック（セッション削除等） */
+  onAutoCompact?: (channelId: string) => void;
+}
+
 /**
  * 設定に基づいてAgentRunnerを作成
  */
-export function createAgentRunner(backend: AgentBackend, config: AgentConfig): AgentRunner {
+export function createAgentRunner(
+  backend: AgentBackend,
+  config: AgentConfig,
+  options?: CreateAgentRunnerOptions
+): AgentRunner {
   switch (backend) {
     case 'claude-code':
       // persistent モードなら RunnerManager を使用（複数チャンネル同時処理）
@@ -45,6 +54,9 @@ export function createAgentRunner(backend: AgentBackend, config: AgentConfig): A
         return new RunnerManager(config, {
           maxProcesses: config.maxProcesses,
           idleTimeoutMs: config.idleTimeoutMs,
+          autoCompactIdleMs: config.autoCompactIdleMs,
+          autoCompactTokenThreshold: config.autoCompactTokenThreshold,
+          onAutoCompact: options?.onAutoCompact,
         });
       }
       return new ClaudeCodeRunner(config);

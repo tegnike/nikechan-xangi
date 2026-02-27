@@ -32,6 +32,10 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
   private fullText = '';
   private shuttingDown = false;
   private cancelling = false;
+  private waitingForInitialResult = false;
+
+  // トークン使用量追跡（自動コンパクト判定用）
+  private lastInputTokens = 0;
 
   // サーキットブレーカー: 連続クラッシュ対策
   private crashCount = 0;
@@ -44,6 +48,7 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
   private workdir?: string;
   private skipPermissions: boolean;
   private systemPrompt: string;
+  private sessionInitPrompt?: string;
   private resumeSessionId?: string; // プロセス再起動時に --resume で復元するセッションID
 
   constructor(options?: {
@@ -51,12 +56,14 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     timeoutMs?: number;
     workdir?: string;
     skipPermissions?: boolean;
+    sessionInitPrompt?: string;
   }) {
     super();
     this.model = options?.model;
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.workdir = options?.workdir;
     this.skipPermissions = options?.skipPermissions ?? false;
+    this.sessionInitPrompt = options?.sessionInitPrompt;
     this.systemPrompt = buildPersistentSystemPrompt();
   }
 
@@ -115,6 +122,18 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
       env: cleanEnv(),
     });
     this.processAlive = true;
+
+    // 新規セッション（resumeなし）かつ初期プロンプトが設定されている場合、
+    // 最初のメッセージとして送信（Claude自身が指示に従って処理する）
+    if (!resumeId && this.sessionInitPrompt) {
+      const initMessage = {
+        type: 'user',
+        message: { role: 'user', content: this.sessionInitPrompt },
+      };
+      console.log('[persistent-runner] Sending session init prompt');
+      this.process.stdin?.write(JSON.stringify(initMessage) + '\n');
+      this.waitingForInitialResult = true;
+    }
 
     this.process.stdout?.on('data', (data) => this.handleOutput(data.toString()));
     this.process.stderr?.on('data', (data) => {
@@ -206,13 +225,16 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
   /**
    * JSON メッセージを処理
    */
-  private handleJsonMessage(json: {
-    type: string;
-    session_id?: string;
-    message?: { content?: Array<{ type: string; text?: string }> };
-    result?: string;
-    is_error?: boolean;
-  }): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private handleJsonMessage(json: Record<string, any>): void {
+    // stream_event からトークン使用量を追跡（--verbose 出力）
+    if (json.type === 'stream_event' && json.event?.type === 'message_start') {
+      const inputTokens = json.event?.message?.usage?.input_tokens;
+      if (typeof inputTokens === 'number') {
+        this.lastInputTokens = inputTokens;
+      }
+    }
+
     if (json.type === 'system' && json.session_id) {
       this.sessionId = json.session_id;
       console.log(`[persistent-runner] Session initialized: ${this.sessionId.slice(0, 8)}...`);
@@ -230,6 +252,15 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     if (json.type === 'result') {
       if (json.session_id) {
         this.sessionId = json.session_id;
+      }
+
+      // 初期プロンプトの結果: キューには影響させずスキップ
+      if (this.waitingForInitialResult) {
+        console.log('[persistent-runner] Initial prompt completed, ready for requests');
+        this.waitingForInitialResult = false;
+        this.fullText = '';
+        this.processNext();
+        return;
       }
 
       if (json.is_error) {
@@ -268,10 +299,23 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
       return;
     }
 
+    // プロセスを確保（初期プロンプトの送信もここで行われる）
+    let proc: ChildProcess;
+    try {
+      proc = this.ensureProcess();
+    } catch (e) {
+      const item = this.queue.shift()!;
+      item.reject(e as Error);
+      return;
+    }
+
+    // 初期プロンプトの完了を待つ
+    if (this.waitingForInitialResult) {
+      return;
+    }
+
     this.currentItem = this.queue.shift()!;
     this.fullText = '';
-
-    const proc = this.ensureProcess();
 
     // セッション継続のためのオプションを追加
     const message = {
@@ -435,6 +479,13 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
    */
   isAlive(): boolean {
     return this.processAlive;
+  }
+
+  /**
+   * 最後に記録された入力トークン数（コンテキストサイズの近似値）
+   */
+  getLastInputTokens(): number {
+    return this.lastInputTokens;
   }
 
   /**

@@ -20,6 +20,9 @@ export class RunnerManager implements AgentRunner {
   private pool = new Map<string, PoolEntry>();
   private maxProcesses: number;
   private idleTimeoutMs: number;
+  private autoCompactIdleMs: number;
+  private autoCompactTokenThreshold: number;
+  private onAutoCompact?: (channelId: string) => void;
   private cleanupInterval: ReturnType<typeof setInterval> | null = null;
   private agentConfig: AgentConfig;
 
@@ -33,17 +36,23 @@ export class RunnerManager implements AgentRunner {
     options?: {
       maxProcesses?: number;
       idleTimeoutMs?: number;
+      autoCompactIdleMs?: number;
+      autoCompactTokenThreshold?: number;
+      onAutoCompact?: (channelId: string) => void;
     }
   ) {
     this.agentConfig = agentConfig;
     this.maxProcesses = options?.maxProcesses ?? 10;
     this.idleTimeoutMs = options?.idleTimeoutMs ?? 30 * 60 * 1000; // 30分
+    this.autoCompactIdleMs = options?.autoCompactIdleMs ?? 3 * 60 * 60 * 1000; // 3時間
+    this.autoCompactTokenThreshold = options?.autoCompactTokenThreshold ?? 50000;
+    this.onAutoCompact = options?.onAutoCompact;
 
     // 定期クリーンアップ開始
     this.cleanupInterval = setInterval(() => this.cleanupIdle(), RunnerManager.CLEANUP_INTERVAL_MS);
 
     console.log(
-      `[runner-manager] Initialized (maxProcesses: ${this.maxProcesses}, idleTimeout: ${this.idleTimeoutMs / 1000}s)`
+      `[runner-manager] Initialized (maxProcesses: ${this.maxProcesses}, idleTimeout: ${this.idleTimeoutMs / 1000}s, autoCompact: idle>${this.autoCompactIdleMs / 1000}s & tokens>${this.autoCompactTokenThreshold})`
     );
   }
 
@@ -106,13 +115,23 @@ export class RunnerManager implements AgentRunner {
   private cleanupIdle(): void {
     const now = Date.now();
     const toRemove: string[] = [];
+    const toAutoCompact: string[] = [];
 
     for (const [channelId, entry] of this.pool.entries()) {
-      if (now - entry.lastUsed > this.idleTimeoutMs) {
-        toRemove.push(channelId);
+      const idleMs = now - entry.lastUsed;
+
+      if (idleMs > this.idleTimeoutMs) {
+        // 自動コンパクト判定: アイドル時間が閾値を超え、かつトークン数が閾値を超えている場合
+        const tokens = entry.runner.getLastInputTokens();
+        if (idleMs > this.autoCompactIdleMs && tokens > this.autoCompactTokenThreshold) {
+          toAutoCompact.push(channelId);
+        } else {
+          toRemove.push(channelId);
+        }
       }
     }
 
+    // 通常のアイドルクリーンアップ（セッションは保持）
     for (const channelId of toRemove) {
       const entry = this.pool.get(channelId)!;
       console.log(
@@ -122,9 +141,22 @@ export class RunnerManager implements AgentRunner {
       this.pool.delete(channelId);
     }
 
-    if (toRemove.length > 0) {
+    // 自動コンパクト（セッションもリセット）
+    for (const channelId of toAutoCompact) {
+      const entry = this.pool.get(channelId)!;
+      const tokens = entry.runner.getLastInputTokens();
       console.log(
-        `[runner-manager] Cleaned up ${toRemove.length} idle runner(s) (pool: ${this.pool.size}/${this.maxProcesses})`
+        `[runner-manager] Auto-compact: channel ${channelId} (idle ${Math.round((now - entry.lastUsed) / 1000)}s, tokens: ${tokens})`
+      );
+      entry.runner.shutdown();
+      this.pool.delete(channelId);
+      this.onAutoCompact?.(channelId);
+    }
+
+    const totalCleaned = toRemove.length + toAutoCompact.length;
+    if (totalCleaned > 0) {
+      console.log(
+        `[runner-manager] Cleaned up ${toRemove.length} idle + ${toAutoCompact.length} auto-compacted runner(s) (pool: ${this.pool.size}/${this.maxProcesses})`
       );
     }
   }
