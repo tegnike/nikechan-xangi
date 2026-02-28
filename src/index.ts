@@ -1161,7 +1161,12 @@ async function main() {
       // 処理中メッセージを送信
       const thinkingMsg = await (
         channel as {
-          send: (content: string) => Promise<{ edit: (content: string) => Promise<unknown> }>;
+          send: (
+            content: string
+          ) => Promise<{
+            edit: (content: string) => Promise<unknown>;
+            delete: () => Promise<unknown>;
+          }>;
         }
       ).send('🤔 考え中...');
 
@@ -1198,9 +1203,21 @@ async function main() {
         // 結果を送信
         const filePaths = extractFilePaths(result);
         const displayText = filePaths.length > 0 ? stripFilePaths(result) : result;
+        const cleanedDisplay = displayText.trim();
+
+        // 空応答、[SILENT] マーカー、またはスキップ応答パターンの場合は考え中メッセージを削除して終了
+        const isSilent =
+          !cleanedDisplay ||
+          cleanedDisplay.includes('[SILENT]') ||
+          (cleanedDisplay.length < 80 &&
+            /(?:quiet\s*hours|NO_SPEAK|スキップ|終了|セッション継続)/i.test(cleanedDisplay));
+        if (isSilent && filePaths.length === 0) {
+          await thinkingMsg.delete().catch(() => {});
+          return result;
+        }
 
         // 2000文字超の応答は分割送信
-        const textChunks = splitMessage(displayText, DISCORD_SAFE_LENGTH);
+        const textChunks = splitMessage(cleanedDisplay, DISCORD_SAFE_LENGTH);
         await thinkingMsg.edit(textChunks[0] || '✅');
         if (textChunks.length > 1) {
           const ch = channel as { send: (content: string) => Promise<unknown> };
