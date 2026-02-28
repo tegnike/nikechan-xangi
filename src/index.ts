@@ -76,9 +76,10 @@ function splitScheduleContent(content: string, maxLength: number): string[] {
 /** スケジュールタイプに応じたラベルを生成 */
 function getTypeLabel(
   type: ScheduleType,
-  options: { expression?: string; runAt?: string; channelInfo?: string }
+  options: { expression?: string; runAt?: string; channelInfo?: string; timezone?: string }
 ): string {
   const channelInfo = options.channelInfo || '';
+  const tz = options.timezone || 'Asia/Tokyo';
   switch (type) {
     case 'cron':
       return `🔄 繰り返し: \`${options.expression}\`${channelInfo}`;
@@ -86,7 +87,7 @@ function getTypeLabel(
       return `🚀 起動時に実行${channelInfo}`;
     case 'once':
     default:
-      return `⏰ 実行時刻: ${new Date(options.runAt!).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}${channelInfo}`;
+      return `⏰ 実行時刻: ${new Date(options.runAt!).toLocaleString('ja-JP', { timeZone: tz })}${channelInfo}`;
   }
 }
 
@@ -141,7 +142,7 @@ async function main() {
 
   // スケジューラを初期化（ワークスペースの .xangi を使用）
   const dataDir = process.env.DATA_DIR || join(workdir, '.xangi');
-  const scheduler = new Scheduler(dataDir);
+  const scheduler = new Scheduler(dataDir, { timezone: config.timezone });
 
   // セッション永続化を初期化
   initSessions(dataDir);
@@ -381,7 +382,10 @@ async function main() {
     }
 
     if (interaction.commandName === 'schedule') {
-      await handleScheduleCommand(interaction, scheduler, config.scheduler);
+      await handleScheduleCommand(interaction, scheduler, {
+        ...config.scheduler,
+        timezone: config.timezone,
+      });
       return;
     }
 
@@ -499,7 +503,7 @@ async function main() {
           const messageList = messages
             .reverse()
             .map((m) => {
-              const time = m.createdAt.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+              const time = m.createdAt.toLocaleString('ja-JP', { timeZone: config.timezone });
               const content = sanitizeChannelMentions(m.content || '(添付ファイルのみ)');
               return `[${time}] ${m.author.tag}: ${content}`;
             })
@@ -660,7 +664,7 @@ async function main() {
           const messageList = messages
             .reverse()
             .map((m) => {
-              const time = m.createdAt.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+              const time = m.createdAt.toLocaleString('ja-JP', { timeZone: config.timezone });
               const content = sanitizeChannelMentions(
                 (m.content || '(添付ファイルのみ)').slice(0, 200)
               );
@@ -721,7 +725,7 @@ async function main() {
             const results = matched
               .first(10)
               ?.map((m) => {
-                const time = m.createdAt.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+                const time = m.createdAt.toLocaleString('ja-JP', { timeZone: config.timezone });
                 return `[${time}] ${m.author.tag}: ${sanitizeChannelMentions(m.content.slice(0, 200))}`;
               })
               .join('\n');
@@ -958,7 +962,10 @@ async function main() {
         console.log(
           `[xangi] Processing schedule command from response: ${trimmed.slice(0, 50)}...`
         );
-        await executeScheduleFromResponse(trimmed, sourceMessage, scheduler, config.scheduler);
+        await executeScheduleFromResponse(trimmed, sourceMessage, scheduler, {
+          ...config.scheduler,
+          timezone: config.timezone,
+        });
       }
 
       i++;
@@ -1031,7 +1038,10 @@ async function main() {
 
     // !schedule コマンドの処理
     if (prompt.startsWith('!schedule')) {
-      await handleScheduleMessage(message, prompt, scheduler, config.scheduler);
+      await handleScheduleMessage(message, prompt, scheduler, {
+        ...config.scheduler,
+        timezone: config.timezone,
+      });
       return;
     }
 
@@ -1781,7 +1791,7 @@ function handleSettingsFromResponse(text: string): void {
 async function handleScheduleCommand(
   interaction: ChatInputCommandInteraction,
   scheduler: Scheduler,
-  schedulerConfig?: { enabled: boolean; startupEnabled: boolean }
+  schedulerConfig?: { enabled: boolean; startupEnabled: boolean; timezone?: string }
 ): Promise<void> {
   const subcommand = interaction.options.getSubcommand();
   const channelId = interaction.channelId;
@@ -1818,6 +1828,7 @@ async function handleScheduleCommand(
           expression: schedule.expression,
           runAt: schedule.runAt,
           channelInfo,
+          timezone: schedulerConfig?.timezone,
         });
 
         await interaction.reply(
@@ -1875,7 +1886,7 @@ async function handleScheduleMessage(
   message: Message,
   prompt: string,
   scheduler: Scheduler,
-  schedulerConfig?: { enabled: boolean; startupEnabled: boolean }
+  schedulerConfig?: { enabled: boolean; startupEnabled: boolean; timezone?: string }
 ): Promise<void> {
   const args = prompt.replace(/^!schedule\s*/, '').trim();
   const channelId = message.channel.id;
@@ -2016,6 +2027,7 @@ async function handleScheduleMessage(
       expression: schedule.expression,
       runAt: schedule.runAt,
       channelInfo,
+      timezone: schedulerConfig?.timezone,
     });
 
     await message.reply(
@@ -2033,7 +2045,7 @@ async function executeScheduleFromResponse(
   text: string,
   sourceMessage: Message,
   scheduler: Scheduler,
-  schedulerConfig?: { enabled: boolean; startupEnabled: boolean }
+  schedulerConfig?: { enabled: boolean; startupEnabled: boolean; timezone?: string }
 ): Promise<void> {
   const args = text.replace(/^!schedule\s*/, '').trim();
   const channelId = sourceMessage.channel.id;
@@ -2166,6 +2178,7 @@ async function executeScheduleFromResponse(
       expression: schedule.expression,
       runAt: schedule.runAt,
       channelInfo,
+      timezone: schedulerConfig?.timezone,
     });
 
     if ('send' in channel) {

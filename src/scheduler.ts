@@ -55,8 +55,10 @@ export class Scheduler {
   private lastReloadTime = 0;
   private quiet: boolean;
   private disabled = false;
-  constructor(dataDir?: string, options?: { quiet?: boolean }) {
+  private timezone: string;
+  constructor(dataDir?: string, options?: { quiet?: boolean; timezone?: string }) {
     this.quiet = options?.quiet ?? false;
+    this.timezone = options?.timezone ?? 'Asia/Tokyo';
     const dir = dataDir || join(process.cwd(), '.xangi');
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
@@ -280,7 +282,7 @@ export class Scheduler {
         () => {
           this.executeJob(schedule);
         },
-        { timezone: 'Asia/Tokyo' }
+        { timezone: this.timezone }
       );
       this.cronJobs.set(schedule.id, task);
       this.log(
@@ -303,7 +305,7 @@ export class Scheduler {
       this.timers.set(schedule.id, timer);
       const runDate = new Date(schedule.runAt);
       this.log(
-        `[scheduler] Timer set: ${schedule.id} → ${runDate.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })} (${Math.round(delay / 1000)}s)`
+        `[scheduler] Timer set: ${schedule.id} → ${runDate.toLocaleString('ja-JP', { timeZone: this.timezone })} (${Math.round(delay / 1000)}s)`
       );
     }
   }
@@ -464,7 +466,7 @@ export function formatScheduleList(
 }
 function formatTime(iso: string): string {
   const d = new Date(iso);
-  return d.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+  return d.toLocaleString('ja-JP');
 }
 /**
  * cron式を人間が読める形式に変換
@@ -658,14 +660,10 @@ export function parseScheduleInput(input: string): {
     const hour = parseInt(timeMatch[1], 10);
     const min = parseInt(timeMatch[2], 10);
     const now = new Date();
-    // Asia/Tokyo で設定
-    const jstOffset = 9 * 60; // JST = UTC+9
-    const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
-    const jstMinutes = utcMinutes + jstOffset;
+    // ローカルタイムゾーンで判定
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
     const targetMinutes = hour * 60 + min;
-    // JSTベースで今日か明日かを判定
-    const currentJstMinutes = jstMinutes % (24 * 60);
-    let diffMinutes = targetMinutes - currentJstMinutes;
+    let diffMinutes = targetMinutes - currentMinutes;
     if (diffMinutes <= 0) {
       diffMinutes += 24 * 60; // 明日
     }
@@ -683,9 +681,9 @@ export function parseScheduleInput(input: string): {
     const dateStr = dateTimeMatch[1];
     const hour = parseInt(dateTimeMatch[2], 10);
     const min = parseInt(dateTimeMatch[3], 10);
-    // JST として解釈
+    // ローカルタイムゾーンとして解釈
     const runAt = new Date(
-      `${dateStr}T${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}:00+09:00`
+      `${dateStr}T${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}:00`
     );
     return {
       type: 'once',
