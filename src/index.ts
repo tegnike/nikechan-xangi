@@ -981,20 +981,33 @@ async function main() {
 
   // チャンネル単位の処理中ロック
   const processingChannels = new Set<string>();
+  // メッセージID重複排除（Discord返信時の二重発火対策）
+  const recentMessageIds = new Set<string>();
 
   // メッセージ処理
   client.on(Events.MessageCreate, async (message) => {
     if (message.author.bot) return;
+
+    // 同一メッセージの二重処理を防止
+    if (recentMessageIds.has(message.id)) return;
+    recentMessageIds.add(message.id);
+    // メモリリーク防止: 60秒後に削除
+    setTimeout(() => recentMessageIds.delete(message.id), 60000);
 
     const isMentioned = message.mentions.has(client.user!);
     const isDM = !message.guild;
     const isAutoReplyChannel =
       config.discord.autoReplyChannels?.includes(message.channel.id) ?? false;
 
+    // Discord返信によるbot宛の暗黙メンションは明示的メンションと区別する
+    // autoReplyChannelでは返信もメンションも同じ扱い（processingChannelsガードを適用）
+    const isReplyToBot = message.reference && message.mentions.repliedUser?.id === client.user!.id;
+    const isExplicitMention = isMentioned && !isReplyToBot;
+
     if (!isMentioned && !isDM && !isAutoReplyChannel) return;
 
-    // 同じチャンネルで処理中なら無視（メンション時は除く）
-    if (!isMentioned && processingChannels.has(message.channel.id)) {
+    // 同じチャンネルで処理中なら無視（明示的メンション時は除く）
+    if (!isExplicitMention && processingChannels.has(message.channel.id)) {
       console.log(`[xangi] Skipping message in busy channel: ${message.channel.id}`);
       return;
     }
@@ -1099,20 +1112,45 @@ async function main() {
       if (result) {
         const feedbackResults = await handleDiscordCommandsInResponse(result, message);
 
-        // フィードバック結果があればエージェントに再注入
+        // フィードバック結果があればエージェントに再注入（新しいreplyは作らない）
         if (feedbackResults.length > 0) {
           const feedbackPrompt = `あなたが実行したコマンドの結果が返ってきました。この情報を踏まえて、元の会話の文脈に沿ってユーザーに返答してください。\n\n${feedbackResults.join('\n\n')}`;
           console.log(`[xangi] Re-injecting ${feedbackResults.length} feedback result(s) to agent`);
-          const feedbackResult = await processPrompt(
-            message,
-            agentRunner,
+          const sessionId = getSession(channelId);
+          const { result: feedbackResult, sessionId: newSid } = await agentRunner.run(
             feedbackPrompt,
-            skipPermissions,
-            channelId,
-            config
+            {
+              skipPermissions: skipPermissions || (config.agent.config.skipPermissions ?? false),
+              sessionId,
+              channelId,
+            }
           );
-          // 再注入後の応答にもコマンドがあれば処理（ただし再帰は1回のみ）
-          if (feedbackResult) {
+          setSession(channelId, newSid);
+
+          // 再注入結果をチャンネルに送信（既存の会話に追加メッセージとして）
+          if (feedbackResult?.trim()) {
+            const filePaths = extractFilePaths(feedbackResult);
+            const displayText =
+              filePaths.length > 0 ? stripFilePaths(feedbackResult) : feedbackResult;
+            const cleanedDisplay = displayText.trim();
+            if (cleanedDisplay && 'send' in message.channel) {
+              const textChunks = splitMessage(cleanedDisplay, DISCORD_SAFE_LENGTH);
+              for (const chunk of textChunks) {
+                await (message.channel as { send: (content: string) => Promise<unknown> }).send(
+                  chunk
+                );
+              }
+            }
+            if (filePaths.length > 0 && 'send' in message.channel) {
+              await (
+                message.channel as {
+                  send: (options: { files: { attachment: string }[] }) => Promise<unknown>;
+                }
+              ).send({
+                files: filePaths.map((fp) => ({ attachment: fp })),
+              });
+            }
+            // 再注入後の応答にもコマンドがあれば処理（ただし再帰は1回のみ）
             await handleDiscordCommandsInResponse(feedbackResult, message);
           }
         }
@@ -1161,9 +1199,7 @@ async function main() {
       // 処理中メッセージを送信
       const thinkingMsg = await (
         channel as {
-          send: (
-            content: string
-          ) => Promise<{
+          send: (content: string) => Promise<{
             edit: (content: string) => Promise<unknown>;
             delete: () => Promise<unknown>;
           }>;
