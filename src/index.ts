@@ -1604,7 +1604,7 @@ async function processPrompt(
     }
 
     // ベース絵文字（処理中ずっと表示、完了時に外す）
-    await message.react('✅').catch(() => {});
+    await message.react('👀').catch(() => {});
 
     // フェーズに応じたリアクション絵文字（ベース絵文字の横に表示）
     const phaseEmojis = { thinking: '🧠', tool_use: '🔧', text: '✍️' } as const;
@@ -1674,6 +1674,13 @@ async function processPrompt(
             partialTimer = setTimeout(() => {
               sendPartialText(fullText);
             }, PARTIAL_SEND_DELAY_MS);
+          },
+          onCompact: () => {
+            if ('send' in message.channel) {
+              (message.channel as unknown as { send: (c: string) => Promise<unknown> })
+                .send('🗜️ コンテキスト圧縮中…')
+                .catch(() => {});
+            }
           },
         },
         { skipPermissions, sessionId, channelId }
@@ -1809,7 +1816,7 @@ async function processPrompt(
     return null;
   } finally {
     // ベース絵文字・フェーズ絵文字をすべて削除
-    for (const emoji of ['✅', '🧠', '🔧', '✍️']) {
+    for (const emoji of ['👀', '🧠', '🔧', '✍️']) {
       await message.reactions.cache
         .find((r) => r.emoji.name === emoji)
         ?.users.remove(message.client.user?.id)

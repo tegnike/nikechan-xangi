@@ -235,9 +235,19 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
       }
     }
 
-    if (json.type === 'system' && json.session_id) {
-      this.sessionId = json.session_id;
-      console.log(`[persistent-runner] Session initialized: ${this.sessionId.slice(0, 8)}...`);
+    if (json.type === 'system') {
+      if (json.session_id) {
+        this.sessionId = json.session_id;
+        console.log(`[persistent-runner] Session initialized: ${this.sessionId.slice(0, 8)}...`);
+      }
+      if (json.subtype === 'compact_boundary') {
+        const trigger = json.compact_metadata?.trigger ?? 'auto';
+        const preTokens = json.compact_metadata?.pre_tokens ?? 0;
+        console.log(
+          `[persistent-runner] Compact detected: trigger=${trigger}, pre_tokens=${preTokens}`
+        );
+        this.currentItem?.callbacks?.onCompact?.(trigger, preTokens);
+      }
     }
 
     if (json.type === 'assistant' && json.message?.content) {
