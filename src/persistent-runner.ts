@@ -242,7 +242,12 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
 
     if (json.type === 'assistant' && json.message?.content) {
       for (const block of json.message.content) {
-        if (block.type === 'text' && block.text) {
+        if (block.type === 'thinking') {
+          this.currentItem?.callbacks?.onPhaseChange?.('thinking');
+        } else if (block.type === 'tool_use') {
+          this.currentItem?.callbacks?.onPhaseChange?.('tool_use', block.name);
+        } else if (block.type === 'text' && block.text) {
+          this.currentItem?.callbacks?.onPhaseChange?.('text');
           this.fullText += block.text;
           this.currentItem?.callbacks?.onText?.(block.text, this.fullText);
         }

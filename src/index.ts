@@ -22,7 +22,7 @@ import {
   buildPromptWithAttachments,
 } from './file-utils.js';
 import { initSettings, loadSettings, saveSettings, formatSettings } from './settings.js';
-import { DISCORD_MAX_LENGTH, DISCORD_SAFE_LENGTH, STREAM_UPDATE_INTERVAL_MS } from './constants.js';
+import { DISCORD_MAX_LENGTH, DISCORD_SAFE_LENGTH } from './constants.js';
 import {
   Scheduler,
   parseScheduleInput,
@@ -1196,16 +1196,6 @@ async function main() {
         return promptCommands.commands.map((c) => `✅ ${c.slice(0, 50)}`).join('\n');
       }
 
-      // 処理中メッセージを送信
-      const thinkingMsg = await (
-        channel as {
-          send: (content: string) => Promise<{
-            edit: (content: string) => Promise<unknown>;
-            delete: () => Promise<unknown>;
-          }>;
-        }
-      ).send('🤔 考え中...');
-
       try {
         const sessionId = getSession(channelId);
         const { result, sessionId: newSessionId } = await agentRunner.run(remainingPrompt, {
@@ -1241,25 +1231,21 @@ async function main() {
         const displayText = filePaths.length > 0 ? stripFilePaths(result) : result;
         const cleanedDisplay = displayText.trim();
 
-        // 空応答、[SILENT] マーカー、またはスキップ応答パターンの場合は考え中メッセージを削除して終了
+        // 空応答、[SILENT] マーカー、またはスキップ応答パターンの場合はスキップ
         const isSilent =
           !cleanedDisplay ||
           cleanedDisplay.includes('[SILENT]') ||
           (cleanedDisplay.length < 80 &&
             /(?:quiet\s*hours|NO_SPEAK|スキップ|終了|セッション継続)/i.test(cleanedDisplay));
         if (isSilent && filePaths.length === 0) {
-          await thinkingMsg.delete().catch(() => {});
           return result;
         }
 
         // 2000文字超の応答は分割送信
         const textChunks = splitMessage(cleanedDisplay, DISCORD_SAFE_LENGTH);
-        await thinkingMsg.edit(textChunks[0] || '✅');
-        if (textChunks.length > 1) {
-          const ch = channel as { send: (content: string) => Promise<unknown> };
-          for (let i = 1; i < textChunks.length; i++) {
-            await ch.send(textChunks[i]);
-          }
+        const ch = channel as { send: (content: string) => Promise<unknown> };
+        for (const chunk of textChunks) {
+          await ch.send(chunk || '✅');
         }
 
         if (filePaths.length > 0) {
@@ -1272,8 +1258,9 @@ async function main() {
 
         return result;
       } catch (error) {
+        const ch = channel as { send: (content: string) => Promise<unknown> };
         if (error instanceof Error && error.message === 'Request cancelled by user') {
-          await thinkingMsg.edit('🛑 タスクを停止しました');
+          await ch.send('🛑 タスクを停止しました');
         } else {
           const errorMsg = error instanceof Error ? error.message : String(error);
           let errorDetail: string;
@@ -1286,7 +1273,7 @@ async function main() {
           } else {
             errorDetail = `❌ エラー: ${errorMsg.slice(0, 200)}`;
           }
-          await thinkingMsg.edit(errorDetail);
+          await ch.send(errorDetail);
         }
         throw error;
       }
@@ -1590,7 +1577,6 @@ async function processPrompt(
   channelId: string,
   config: ReturnType<typeof loadConfig>
 ): Promise<string | null> {
-  let replyMessage: Message | null = null;
   try {
     // チャンネル情報をプロンプトに付与
     const channelName =
@@ -1600,7 +1586,6 @@ async function processPrompt(
     }
 
     console.log(`[xangi] Processing message in channel ${channelId}`);
-    await message.react('👀').catch(() => {});
 
     const sessionId = getSession(channelId);
     const useStreaming = config.discord.streaming ?? true;
@@ -1618,75 +1603,91 @@ async function processPrompt(
       console.log(`[xangi] Using one-shot skip runner for channel ${channelId}`);
     }
 
-    // 最初のメッセージを送信
-    replyMessage = await message.reply('🤔 考え中.');
+    // ベース絵文字（処理中ずっと表示、完了時に外す）
+    await message.react('✅').catch(() => {});
+
+    // フェーズに応じたリアクション絵文字（ベース絵文字の横に表示）
+    const phaseEmojis = { thinking: '🧠', tool_use: '🔧', text: '✍️' } as const;
+    let currentPhaseEmoji: string | null = null;
+
+    const updatePhaseReaction = async (emoji: string) => {
+      if (emoji === currentPhaseEmoji) return;
+      const botUserId = message.client.user?.id;
+      // 前のフェーズ絵文字を削除
+      if (currentPhaseEmoji) {
+        await message.reactions.cache
+          .find((r) => r.emoji.name === currentPhaseEmoji)
+          ?.users.remove(botUserId)
+          .catch(() => {});
+      }
+      // 新しいフェーズ絵文字を追加
+      currentPhaseEmoji = emoji;
+      await message.react(emoji).catch(() => {});
+    };
+
+    // 初期フェーズ（thinking）
+    await updatePhaseReaction(phaseEmojis.thinking);
 
     let result: string;
     let newSessionId: string;
+    // ストリーミング中に途中送信済みのテキスト（完了後の送信で重複を防ぐ）
+    let sentLength = 0;
 
     if (useStreaming && showThinking && !needsSkipRunner) {
       // ストリーミング + 思考表示モード（persistent-runner のみ）
-      let lastUpdateTime = 0;
-      let pendingUpdate = false;
-      let firstTextReceived = false;
+      // 一定時間テキストが来なかったら途中送信するタイマー
+      const PARTIAL_SEND_DELAY_MS = 5000;
+      let partialTimer: ReturnType<typeof setTimeout> | null = null;
+      let isFirstReply = true;
 
-      // 最初のテキストが届くまで考え中アニメーション
-      let dotCount = 1;
-      const thinkingInterval = setInterval(() => {
-        if (firstTextReceived) return;
-        dotCount = (dotCount % 3) + 1;
-        const dots = '.'.repeat(dotCount);
-        replyMessage!.edit(`🤔 考え中${dots}`).catch(() => {});
-      }, 1000);
+      const sendPartialText = async (text: string) => {
+        // 未送信分を抽出して送信
+        const unsent = text.slice(sentLength);
+        if (!unsent.trim()) return;
 
-      let streamResult: { result: string; sessionId: string };
-      try {
-        streamResult = await agentRunner.runStream(
-          prompt,
-          {
-            onText: (_chunk, fullText) => {
-              if (!firstTextReceived) {
-                firstTextReceived = true;
-                clearInterval(thinkingInterval);
-              }
-              const now = Date.now();
-              if (now - lastUpdateTime >= STREAM_UPDATE_INTERVAL_MS && !pendingUpdate) {
-                pendingUpdate = true;
-                lastUpdateTime = now;
-                replyMessage!
-                  .edit((fullText + ' ▌').slice(0, DISCORD_MAX_LENGTH))
-                  .catch((err) => {
-                    console.error('[xangi] Failed to edit message:', err.message);
-                  })
-                  .finally(() => {
-                    pendingUpdate = false;
-                  });
-              }
-            },
+        const cleaned = stripCommandsFromDisplay(stripFilePaths(unsent));
+        if (!cleaned.trim()) return;
+
+        const chunks = splitMessage(cleaned, DISCORD_SAFE_LENGTH);
+        for (const chunk of chunks) {
+          if (isFirstReply) {
+            await message.reply(chunk).catch(() => {});
+            isFirstReply = false;
+          } else if ('send' in message.channel) {
+            await (message.channel as unknown as { send: (c: string) => Promise<unknown> })
+              .send(chunk)
+              .catch(() => {});
+          }
+        }
+        sentLength = text.length;
+      };
+
+      const streamResult = await agentRunner.runStream(
+        prompt,
+        {
+          onPhaseChange: (phase) => {
+            updatePhaseReaction(phaseEmojis[phase]);
           },
-          { skipPermissions, sessionId, channelId }
-        );
-      } finally {
-        clearInterval(thinkingInterval);
-      }
+          onText: (_chunk, fullText) => {
+            // テキスト受信のたびにタイマーリセット
+            if (partialTimer) clearTimeout(partialTimer);
+            partialTimer = setTimeout(() => {
+              sendPartialText(fullText);
+            }, PARTIAL_SEND_DELAY_MS);
+          },
+        },
+        { skipPermissions, sessionId, channelId }
+      );
+      // タイマーが残っていればクリア
+      if (partialTimer) clearTimeout(partialTimer);
+
       result = streamResult.result;
       newSessionId = streamResult.sessionId;
     } else {
       // 非ストリーミング or ワンショットskipランナー
-      let dotCount = 1;
-      const thinkingInterval = setInterval(() => {
-        dotCount = (dotCount % 3) + 1;
-        const dots = '.'.repeat(dotCount);
-        replyMessage!.edit(`🤔 考え中${dots}`).catch(() => {});
-      }, 1000);
-
-      try {
-        const runResult = await runner.run(prompt, { skipPermissions, sessionId, channelId });
-        result = runResult.result;
-        newSessionId = runResult.sessionId;
-      } finally {
-        clearInterval(thinkingInterval);
-      }
+      const runResult = await runner.run(prompt, { skipPermissions, sessionId, channelId });
+      result = runResult.result;
+      newSessionId = runResult.sessionId;
     }
 
     setSession(channelId, newSessionId);
@@ -1696,22 +1697,38 @@ async function processPrompt(
 
     // ファイルパスを抽出して添付送信
     const filePaths = extractFilePaths(result);
-    const displayText = filePaths.length > 0 ? stripFilePaths(result) : result;
 
-    // SYSTEM_COMMAND: 行と !discord / !schedule コマンド行を表示テキストから除去
-    // コードブロック内のコマンドは残す（表示用テキストなので消さない）
-    const cleanText = stripCommandsFromDisplay(displayText);
+    // 未送信の残りテキストを送信
+    const remainingRaw = result.slice(sentLength);
+    const remainingClean = remainingRaw
+      ? stripCommandsFromDisplay(stripFilePaths(remainingRaw))
+      : '';
 
-    // 2000文字超の応答は分割送信
-    const chunks = splitMessage(cleanText, DISCORD_SAFE_LENGTH);
-    await replyMessage!.edit(chunks[0] || '✅');
-    if (chunks.length > 1 && 'send' in message.channel) {
-      const channel = message.channel as unknown as {
-        send: (content: string) => Promise<unknown>;
-      };
-      for (let i = 1; i < chunks.length; i++) {
-        await channel.send(chunks[i]);
+    if (remainingClean.trim()) {
+      const chunks = splitMessage(remainingClean, DISCORD_SAFE_LENGTH);
+      if (sentLength === 0) {
+        // 途中送信なし → 最初のチャンクはreplyで
+        await message.reply(chunks[0]);
+        if (chunks.length > 1 && 'send' in message.channel) {
+          const channel = message.channel as unknown as {
+            send: (content: string) => Promise<unknown>;
+          };
+          for (let i = 1; i < chunks.length; i++) {
+            await channel.send(chunks[i]);
+          }
+        }
+      } else if ('send' in message.channel) {
+        // 途中送信あり → 続きはsendで
+        const channel = message.channel as unknown as {
+          send: (content: string) => Promise<unknown>;
+        };
+        for (const chunk of chunks) {
+          await channel.send(chunk);
+        }
       }
+    } else if (sentLength === 0) {
+      // テキストが空でも途中送信もなかった場合
+      await message.reply('✅');
     }
 
     // AIの応答から SYSTEM_COMMAND: を検知して実行
@@ -1737,7 +1754,7 @@ async function processPrompt(
   } catch (error) {
     if (error instanceof Error && error.message === 'Request cancelled by user') {
       console.log('[xangi] Request cancelled by user');
-      await replyMessage?.edit('🛑 停止しました').catch(() => {});
+      await message.reply('🛑 停止しました').catch(() => {});
       return null;
     }
     console.error('[xangi] Error:', error);
@@ -1757,11 +1774,7 @@ async function processPrompt(
     }
 
     // エラー詳細を表示
-    if (replyMessage) {
-      await replyMessage.edit(errorDetail).catch(() => {});
-    } else {
-      await message.reply(errorDetail).catch(() => {});
-    }
+    await message.reply(errorDetail).catch(() => {});
 
     // エラー後にエージェントへ自動フォローアップ（サーキットブレーカー時は除く）
     if (!errorMsg.includes('Circuit breaker')) {
@@ -1795,13 +1808,15 @@ async function processPrompt(
 
     return null;
   } finally {
-    // 👀 リアクションを削除
-    await message.reactions.cache
-      .find((r) => r.emoji.name === '👀')
-      ?.users.remove(message.client.user?.id)
-      .catch((err) => {
-        console.error('[xangi] Failed to remove 👀 reaction:', err.message || err);
-      });
+    // ベース絵文字・フェーズ絵文字をすべて削除
+    for (const emoji of ['✅', '🧠', '🔧', '✍️']) {
+      await message.reactions.cache
+        .find((r) => r.emoji.name === emoji)
+        ?.users.remove(message.client.user?.id)
+        .catch((err) => {
+          console.error(`[xangi] Failed to remove ${emoji} reaction:`, err.message || err);
+        });
+    }
   }
 }
 

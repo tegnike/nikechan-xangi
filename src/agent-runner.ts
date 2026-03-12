@@ -15,8 +15,11 @@ export interface RunResult {
   sessionId: string;
 }
 
+export type AgentPhase = 'thinking' | 'tool_use' | 'text';
+
 export interface StreamCallbacks {
   onText?: (text: string, fullText: string) => void;
+  onPhaseChange?: (phase: AgentPhase, detail?: string) => void;
   onComplete?: (result: RunResult) => void;
   onError?: (error: Error) => void;
 }

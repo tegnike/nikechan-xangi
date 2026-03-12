@@ -209,7 +209,12 @@ export class ClaudeCodeRunner {
             const json = JSON.parse(line);
             if (json.type === 'assistant' && json.message?.content) {
               for (const block of json.message.content) {
-                if (block.type === 'text') {
+                if (block.type === 'thinking') {
+                  callbacks.onPhaseChange?.('thinking');
+                } else if (block.type === 'tool_use') {
+                  callbacks.onPhaseChange?.('tool_use', block.name);
+                } else if (block.type === 'text') {
+                  callbacks.onPhaseChange?.('text');
                   fullText += block.text;
                   callbacks.onText?.(block.text, fullText);
                 }
