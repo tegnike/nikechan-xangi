@@ -163,6 +163,10 @@ async function main() {
       )
       .addStringOption((option) => option.setName('args').setDescription('引数').setRequired(false))
       .toJSON(),
+    new SlashCommandBuilder()
+      .setName('compact')
+      .setDescription('セッションのコンテキストを圧縮する')
+      .toJSON(),
     new SlashCommandBuilder().setName('settings').setDescription('現在の設定を表示する').toJSON(),
     new SlashCommandBuilder().setName('restart').setDescription('ボットを再起動する').toJSON(),
     new SlashCommandBuilder()
@@ -276,6 +280,26 @@ async function main() {
       deleteSession(channelId);
       agentRunner.destroy?.(channelId);
       await interaction.reply('🆕 新しいセッションを開始しました');
+      return;
+    }
+
+    if (interaction.commandName === 'compact') {
+      await interaction.deferReply();
+      try {
+        const sessionId = getSession(channelId);
+        const { sessionId: newSessionId } = await agentRunner.run('/compact', {
+          skipPermissions: true,
+          sessionId,
+          channelId,
+        });
+        if (newSessionId) setSession(channelId, newSessionId);
+        await interaction.editReply('📦 コンテキストを圧縮しました');
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        await interaction
+          .editReply(`❌ 圧縮に失敗しました: ${errorMsg.slice(0, 200)}`)
+          .catch(() => {});
+      }
       return;
     }
 
