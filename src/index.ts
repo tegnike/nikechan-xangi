@@ -1038,6 +1038,14 @@ async function main() {
     const isAutoReplyChannel =
       config.discord.autoReplyChannels?.includes(message.channel.id) ?? false;
 
+    // Discord返信によるbot宛の暗黙メンションは明示的メンションと区別する
+    const isReplyToBot = message.reference && message.mentions.repliedUser?.id === client.user!.id;
+    const isExplicitMention = isMentioned && !isReplyToBot;
+
+    console.log(
+      `[xangi:debug] MessageCreate: msgId=${message.id}, channelId=${message.channel.id}, channelType=${message.channel.type}, parentId=${'parentId' in message.channel ? message.channel.parentId : 'N/A'}, content="${message.content.slice(0, 50)}", isMentioned=${isMentioned}, isAutoReply=${isAutoReplyChannel}`
+    );
+
     if (!isMentioned && !isDM && !isAutoReplyChannel) return;
 
     if (!config.discord.allowedUsers?.includes(message.author.id)) {
@@ -1124,6 +1132,12 @@ async function main() {
     );
 
     const channelId = message.channel.id;
+
+    // 明示的メンション時は現在の処理をキャンセルして早期に次へ進める
+    if (isExplicitMention) {
+      agentRunner.cancel?.(channelId);
+      console.log(`[xangi] Explicit mention: cancelling current processing in ${channelId}`);
+    }
 
     // チャンネル単位のPromiseキューに追加（前のメッセージの処理完了を待ってから実行）
     const prev = channelQueues.get(channelId) ?? Promise.resolve();
