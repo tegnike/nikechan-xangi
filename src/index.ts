@@ -1018,8 +1018,8 @@ async function main() {
     console.error('[xangi] Discord client error:', error.message);
   });
 
-  // チャンネル単位の処理中ロック
-  const processingChannels = new Set<string>();
+  // チャンネル単位のPromiseキュー（メッセージを順次処理）
+  const channelQueues = new Map<string, Promise<void>>();
   // メッセージID重複排除（Discord返信時の二重発火対策）
   const recentMessageIds = new Set<string>();
 
@@ -1038,18 +1038,7 @@ async function main() {
     const isAutoReplyChannel =
       config.discord.autoReplyChannels?.includes(message.channel.id) ?? false;
 
-    // Discord返信によるbot宛の暗黙メンションは明示的メンションと区別する
-    // autoReplyChannelでは返信もメンションも同じ扱い（processingChannelsガードを適用）
-    const isReplyToBot = message.reference && message.mentions.repliedUser?.id === client.user!.id;
-    const isExplicitMention = isMentioned && !isReplyToBot;
-
     if (!isMentioned && !isDM && !isAutoReplyChannel) return;
-
-    // 同じチャンネルで処理中なら無視（明示的メンション時は除く）
-    if (!isExplicitMention && processingChannels.has(message.channel.id)) {
-      console.log(`[xangi] Skipping message in busy channel: ${message.channel.id}`);
-      return;
-    }
 
     if (!config.discord.allowedUsers?.includes(message.author.id)) {
       console.log(`[xangi] Unauthorized user: ${message.author.id} (${message.author.tag})`);
@@ -1136,67 +1125,73 @@ async function main() {
 
     const channelId = message.channel.id;
 
-    processingChannels.add(channelId);
-    try {
-      const result = await processPrompt(
-        message,
-        agentRunner,
-        prompt,
-        skipPermissions,
-        channelId,
-        config
-      );
+    // チャンネル単位のPromiseキューに追加（前のメッセージの処理完了を待ってから実行）
+    const prev = channelQueues.get(channelId) ?? Promise.resolve();
+    const task = prev.then(async () => {
+      try {
+        const result = await processPrompt(
+          message,
+          agentRunner,
+          prompt,
+          skipPermissions,
+          channelId,
+          config
+        );
 
-      // AIの応答から !discord コマンドを検知して実行
-      if (result) {
-        const feedbackResults = await handleDiscordCommandsInResponse(result, message);
+        // AIの応答から !discord コマンドを検知して実行
+        if (result) {
+          const feedbackResults = await handleDiscordCommandsInResponse(result, message);
 
-        // フィードバック結果があればエージェントに再注入（新しいreplyは作らない）
-        if (feedbackResults.length > 0) {
-          const feedbackPrompt = `あなたが実行したコマンドの結果が返ってきました。この情報を踏まえて、元の会話の文脈に沿ってユーザーに返答してください。\n\n${feedbackResults.join('\n\n')}`;
-          console.log(`[xangi] Re-injecting ${feedbackResults.length} feedback result(s) to agent`);
-          const sessionId = getSession(channelId);
-          const { result: feedbackResult, sessionId: newSid } = await agentRunner.run(
-            feedbackPrompt,
-            {
-              skipPermissions: skipPermissions || (config.agent.config.skipPermissions ?? false),
-              sessionId,
-              channelId,
-            }
-          );
-          setSession(channelId, newSid);
-
-          // 再注入結果をチャンネルに送信（既存の会話に追加メッセージとして）
-          if (feedbackResult?.trim()) {
-            const filePaths = extractFilePaths(feedbackResult);
-            const displayText =
-              filePaths.length > 0 ? stripFilePaths(feedbackResult) : feedbackResult;
-            const cleanedDisplay = displayText.trim();
-            if (cleanedDisplay && 'send' in message.channel) {
-              const textChunks = splitMessage(cleanedDisplay, DISCORD_SAFE_LENGTH);
-              for (const chunk of textChunks) {
-                await (message.channel as { send: (content: string) => Promise<unknown> }).send(
-                  chunk
-                );
+          // フィードバック結果があればエージェントに再注入（新しいreplyは作らない）
+          if (feedbackResults.length > 0) {
+            const feedbackPrompt = `あなたが実行したコマンドの結果が返ってきました。この情報を踏まえて、元の会話の文脈に沿ってユーザーに返答してください。\n\n${feedbackResults.join('\n\n')}`;
+            console.log(
+              `[xangi] Re-injecting ${feedbackResults.length} feedback result(s) to agent`
+            );
+            const sessionId = getSession(channelId);
+            const { result: feedbackResult, sessionId: newSid } = await agentRunner.run(
+              feedbackPrompt,
+              {
+                skipPermissions: skipPermissions || (config.agent.config.skipPermissions ?? false),
+                sessionId,
+                channelId,
               }
-            }
-            if (filePaths.length > 0 && 'send' in message.channel) {
-              await (
-                message.channel as {
-                  send: (options: { files: { attachment: string }[] }) => Promise<unknown>;
+            );
+            setSession(channelId, newSid);
+
+            // 再注入結果をチャンネルに送信（既存の会話に追加メッセージとして）
+            if (feedbackResult?.trim()) {
+              const filePaths = extractFilePaths(feedbackResult);
+              const displayText =
+                filePaths.length > 0 ? stripFilePaths(feedbackResult) : feedbackResult;
+              const cleanedDisplay = displayText.trim();
+              if (cleanedDisplay && 'send' in message.channel) {
+                const textChunks = splitMessage(cleanedDisplay, DISCORD_SAFE_LENGTH);
+                for (const chunk of textChunks) {
+                  await (message.channel as { send: (content: string) => Promise<unknown> }).send(
+                    chunk
+                  );
                 }
-              ).send({
-                files: filePaths.map((fp) => ({ attachment: fp })),
-              });
+              }
+              if (filePaths.length > 0 && 'send' in message.channel) {
+                await (
+                  message.channel as {
+                    send: (options: { files: { attachment: string }[] }) => Promise<unknown>;
+                  }
+                ).send({
+                  files: filePaths.map((fp) => ({ attachment: fp })),
+                });
+              }
+              // 再注入後の応答にもコマンドがあれば処理（ただし再帰は1回のみ）
+              await handleDiscordCommandsInResponse(feedbackResult, message);
             }
-            // 再注入後の応答にもコマンドがあれば処理（ただし再帰は1回のみ）
-            await handleDiscordCommandsInResponse(feedbackResult, message);
           }
         }
+      } catch (err) {
+        console.error(`[xangi] Error processing queued message in ${channelId}:`, err);
       }
-    } finally {
-      processingChannels.delete(channelId);
-    }
+    });
+    channelQueues.set(channelId, task);
   });
 
   // Discordボットを起動
