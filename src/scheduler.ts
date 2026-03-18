@@ -14,7 +14,7 @@ import cron from 'node-cron';
 export const SCHEDULE_SEPARATOR = '{{SPLIT}}';
 
 // ─── Types ───────────────────────────────────────────────────────────
-export type ScheduleType = 'cron' | 'once' | 'startup';
+export type ScheduleType = 'cron' | 'once' | 'startup' | 'heartbeat';
 export type Platform = 'discord' | 'slack';
 export interface Schedule {
   id: string;
@@ -35,18 +35,29 @@ export interface Schedule {
   enabled: boolean;
   /** ラベル（任意） */
   label?: string;
+  /** heartbeatインターバル（ミリ秒、type='heartbeat'の場合） */
+  intervalMs?: number;
+  /** 独立セッションで実行するか（cron用） */
+  isolated?: boolean;
+  /** アクティブ時間帯（heartbeat用、この範囲外はスキップ） */
+  activeHours?: {
+    start: string; // "HH:MM" (inclusive)
+    end: string; // "HH:MM" (exclusive)
+  };
 }
 export interface SendMessageFn {
   (channelId: string, message: string): Promise<void>;
 }
 export interface AgentRunFn {
-  (prompt: string, channelId: string): Promise<string>;
+  (prompt: string, channelId: string, options?: { isolated?: boolean }): Promise<string>;
 }
 // ─── Scheduler ───────────────────────────────────────────────────────
 export class Scheduler {
   private schedules: Schedule[] = [];
   private cronJobs = new Map<string, cron.ScheduledTask>();
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private heartbeatRunning = new Map<string, boolean>();
   private filePath: string;
   private senders = new Map<Platform, SendMessageFn>();
   private agentRunners = new Map<Platform, AgentRunFn>();
@@ -107,6 +118,10 @@ export class Scheduler {
       }
       if (runTime <= Date.now()) {
         throw new Error('runAt must be in the future');
+      }
+    } else if (schedule.type === 'heartbeat') {
+      if (!schedule.intervalMs || schedule.intervalMs < 60000) {
+        throw new Error('heartbeat requires intervalMs >= 60000 (1 minute minimum)');
       }
     } else if (schedule.type === 'startup') {
       // startup type needs no additional validation
@@ -226,6 +241,9 @@ export class Scheduler {
     for (const [id] of this.timers) {
       this.stopJob(id);
     }
+    for (const [id] of this.heartbeatTimers) {
+      this.stopJob(id);
+    }
   }
   // ─── File Watching ────────────────────────────────────────────────
   /**
@@ -259,6 +277,9 @@ export class Scheduler {
       this.stopJob(id);
     }
     for (const [id] of this.timers) {
+      this.stopJob(id);
+    }
+    for (const [id] of this.heartbeatTimers) {
       this.stopJob(id);
     }
     // 再読み込み
@@ -307,6 +328,15 @@ export class Scheduler {
       this.log(
         `[scheduler] Timer set: ${schedule.id} → ${runDate.toLocaleString('ja-JP', { timeZone: this.timezone })} (${Math.round(delay / 1000)}s)`
       );
+    } else if (schedule.type === 'heartbeat' && schedule.intervalMs) {
+      const timer = setInterval(() => {
+        this.executeHeartbeat(schedule);
+      }, schedule.intervalMs);
+      this.heartbeatTimers.set(schedule.id, timer);
+      const minutes = Math.round(schedule.intervalMs / 60000);
+      this.log(
+        `[scheduler] Heartbeat started: ${schedule.id} (every ${minutes}min) → ${schedule.channelId}`
+      );
     }
   }
   private stopJob(id: string): void {
@@ -319,6 +349,59 @@ export class Scheduler {
     if (timer) {
       clearTimeout(timer);
       this.timers.delete(id);
+    }
+    const hbTimer = this.heartbeatTimers.get(id);
+    if (hbTimer) {
+      clearInterval(hbTimer);
+      this.heartbeatTimers.delete(id);
+      this.heartbeatRunning.delete(id);
+    }
+  }
+  private isWithinActiveHours(activeHours: { start: string; end: string }): boolean {
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('en-GB', {
+      timeZone: this.timezone,
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    const [nowH, nowM] = timeStr.split(':').map(Number);
+    const nowMinutes = nowH * 60 + nowM;
+    const [startH, startM] = activeHours.start.split(':').map(Number);
+    const [endH, endM] = activeHours.end.split(':').map(Number);
+    const startMinutes = startH * 60 + startM;
+    const endMinutes = endH * 60 + endM;
+    if (startMinutes <= endMinutes) {
+      return nowMinutes >= startMinutes && nowMinutes < endMinutes;
+    }
+    // 日跨ぎ（例: 22:00〜06:00）
+    return nowMinutes >= startMinutes || nowMinutes < endMinutes;
+  }
+  private async executeHeartbeat(schedule: Schedule): Promise<void> {
+    if (schedule.activeHours && !this.isWithinActiveHours(schedule.activeHours)) {
+      this.log(`[scheduler] Heartbeat ${schedule.id} outside active hours, skipping`);
+      return;
+    }
+    if (this.heartbeatRunning.get(schedule.id)) {
+      this.log(`[scheduler] Heartbeat ${schedule.id} still running, skipping this tick`);
+      return;
+    }
+    this.heartbeatRunning.set(schedule.id, true);
+    try {
+      // heartbeat.mdがあれば読み込んでプロンプトに前置
+      const heartbeatMdPath = join(dirname(this.filePath), 'heartbeat.md');
+      let checklist = '';
+      if (existsSync(heartbeatMdPath)) {
+        checklist = readFileSync(heartbeatMdPath, 'utf-8').trim();
+      }
+      const prompt = checklist
+        ? `## Heartbeat Checklist\n${checklist}\n\n## 追加指示\n${schedule.message}\n\n何もアクションが不要なら [SILENT] とだけ返してください。`
+        : `${schedule.message}\n\n何もアクションが不要なら [SILENT] とだけ返してください。`;
+
+      const enhancedSchedule = { ...schedule, message: prompt };
+      await this.executeJob(enhancedSchedule);
+    } finally {
+      this.heartbeatRunning.delete(schedule.id);
     }
   }
   private async executeJob(schedule: Schedule): Promise<void> {
@@ -338,7 +421,9 @@ export class Scheduler {
     }
     try {
       this.log(`[scheduler] Running agent for: ${schedule.id}`);
-      const result = await agentRunner(schedule.message, schedule.channelId);
+      const result = await agentRunner(schedule.message, schedule.channelId, {
+        isolated: schedule.isolated,
+      });
       this.log(`[scheduler] Agent completed: ${schedule.id} (${result.length} chars)`);
     } catch (error) {
       console.error(`[scheduler] Failed to execute ${schedule.id}:`, error);
@@ -418,10 +503,21 @@ export function formatScheduleList(
     const label = s.label ? ` [${s.label}]` : '';
     const channelMention = `<#${s.channelId}>`;
 
-    if (s.type === 'cron' && s.expression) {
-      const humanReadable = cronToHuman(s.expression);
+    if (s.type === 'heartbeat' && s.intervalMs) {
+      const minutes = Math.round(s.intervalMs / 60000);
+      const humanInterval = minutes >= 60 ? `${Math.round(minutes / 60)}時間` : `${minutes}分`;
+      const activeHoursInfo = s.activeHours ? ` (${s.activeHours.start}–${s.activeHours.end})` : '';
       return (
-        `**${i + 1}.** ${status} 📅 ${humanReadable}${label}\n` +
+        `**${i + 1}.** ${status} 💓 ${humanInterval}毎に巡回${activeHoursInfo}${label}\n` +
+        `└ 📝 ${s.message}\n` +
+        `└ 📢 ${channelMention}\n` +
+        `└ 🆔 \`${s.id}\``
+      );
+    } else if (s.type === 'cron' && s.expression) {
+      const humanReadable = cronToHuman(s.expression);
+      const isolatedMark = s.isolated ? ' 🔒独立' : '';
+      return (
+        `**${i + 1}.** ${status} 📅 ${humanReadable}${isolatedMark}${label}\n` +
         `└ 📝 ${s.message}\n` +
         `└ 📢 ${channelMention}\n` +
         `└ 🔄 \`${s.expression}\`\n` +
@@ -556,6 +652,9 @@ export function parseScheduleInput(input: string): {
   type: ScheduleType;
   expression?: string;
   runAt?: string;
+  intervalMs?: number;
+  isolated?: boolean;
+  activeHours?: { start: string; end: string };
   message: string;
   targetChannelId?: string;
 } | null {
@@ -572,6 +671,24 @@ export function parseScheduleInput(input: string): {
   if (!targetChannelId && channelPrefixMatch) {
     targetChannelId = channelPrefixMatch[1];
     trimmed = trimmed.replace(channelPrefixMatch[0], '').trim();
+  }
+  // --active HH:MM-HH:MM オプションを抽出（heartbeat用）
+  let activeHours: { start: string; end: string } | undefined;
+  const activeMatch = trimmed.match(/(?:^|\s)--active\s+(\d{1,2}:\d{2})-(\d{1,2}:\d{2})(?:\s|$)/);
+  if (activeMatch) {
+    activeHours = { start: activeMatch[1], end: activeMatch[2] };
+    trimmed = trimmed.replace(activeMatch[0], ' ').trim();
+  }
+  // cron式の直接指定（--isolated対応）: "cron --isolated 0 9 * * * メッセージ"
+  const cronIsolatedMatch = trimmed.match(/^cron\s+--isolated\s+((?:\S+\s+){4}\S+)\s+(.+)$/i);
+  if (cronIsolatedMatch) {
+    return {
+      type: 'cron',
+      expression: cronIsolatedMatch[1].trim(),
+      message: cronIsolatedMatch[2].trim(),
+      isolated: true,
+      targetChannelId,
+    };
   }
   // cron式の直接指定: "cron 0 9 * * * メッセージ"
   const cronMatch = trimmed.match(/^cron\s+((?:\S+\s+){4}\S+)\s+(.+)$/i);
@@ -689,6 +806,23 @@ export function parseScheduleInput(input: string): {
       type: 'once',
       runAt: runAt.toISOString(),
       message: dateTimeMatch[4].trim(),
+      targetChannelId,
+    };
+  }
+  // "heartbeat NNm メッセージ" or "巡回 NN分 メッセージ"
+  const heartbeatMatch = trimmed.match(
+    /^(?:heartbeat|ハートビート|巡回)\s+(\d+)\s*(m|min|分|h|時間)\s+(.+)$/i
+  );
+  if (heartbeatMatch) {
+    const amount = parseInt(heartbeatMatch[1], 10);
+    const unit = heartbeatMatch[2].toLowerCase();
+    const intervalMs =
+      unit === 'h' || unit === '時間' ? amount * 60 * 60 * 1000 : amount * 60 * 1000;
+    return {
+      type: 'heartbeat',
+      intervalMs,
+      activeHours,
+      message: heartbeatMatch[3].trim(),
       targetChannelId,
     };
   }

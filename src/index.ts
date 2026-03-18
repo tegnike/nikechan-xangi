@@ -76,13 +76,28 @@ function splitScheduleContent(content: string, maxLength: number): string[] {
 /** スケジュールタイプに応じたラベルを生成 */
 function getTypeLabel(
   type: ScheduleType,
-  options: { expression?: string; runAt?: string; channelInfo?: string; timezone?: string }
+  options: {
+    expression?: string;
+    runAt?: string;
+    intervalMs?: number;
+    isolated?: boolean;
+    channelInfo?: string;
+    timezone?: string;
+  }
 ): string {
   const channelInfo = options.channelInfo || '';
   const tz = options.timezone || 'Asia/Tokyo';
   switch (type) {
-    case 'cron':
-      return `🔄 繰り返し: \`${options.expression}\`${channelInfo}`;
+    case 'cron': {
+      const isolatedMark = options.isolated ? ' 🔒独立' : '';
+      return `🔄 繰り返し: \`${options.expression}\`${isolatedMark}${channelInfo}`;
+    }
+    case 'heartbeat': {
+      const ms = options.intervalMs ?? 0;
+      const minutes = Math.round(ms / 60000);
+      const humanInterval = minutes >= 60 ? `${Math.round(minutes / 60)}時間` : `${minutes}分`;
+      return `💓 ${humanInterval}毎に巡回${channelInfo}`;
+    }
     case 'startup':
       return `🚀 起動時に実行${channelInfo}`;
     case 'once':
@@ -1198,7 +1213,7 @@ async function main() {
     });
 
     // スケジューラにエージェント実行関数を登録
-    scheduler.registerAgentRunner('discord', async (prompt, channelId) => {
+    scheduler.registerAgentRunner('discord', async (prompt, channelId, options) => {
       const channel = await client.channels.fetch(channelId);
       if (!channel || !('send' in channel)) {
         throw new Error(`Channel not found: ${channelId}`);
@@ -1221,14 +1236,18 @@ async function main() {
       }
 
       try {
-        const sessionId = getSession(channelId);
+        // isolated=trueならセッションIDを渡さない → 毎回新規セッション
+        const sessionId = options?.isolated ? undefined : getSession(channelId);
         const { result, sessionId: newSessionId } = await agentRunner.run(remainingPrompt, {
           skipPermissions: config.agent.config.skipPermissions ?? false,
           sessionId,
           channelId,
         });
 
-        setSession(channelId, newSessionId);
+        // isolatedの場合はセッションを保存しない（使い捨て）
+        if (!options?.isolated) {
+          setSession(channelId, newSessionId);
+        }
 
         // AI応答内の !discord コマンドを処理（sourceMessage なし、channelIdをフォールバック）
         const feedbackResults = await handleDiscordCommandsInResponse(result, undefined, channelId);
@@ -1926,6 +1945,8 @@ async function handleScheduleCommand(
         const typeLabel = getTypeLabel(schedule.type, {
           expression: schedule.expression,
           runAt: schedule.runAt,
+          intervalMs: schedule.intervalMs,
+          isolated: schedule.isolated,
           channelInfo,
           timezone: schedulerConfig?.timezone,
         });
@@ -2125,6 +2146,7 @@ async function handleScheduleMessage(
     const typeLabel = getTypeLabel(schedule.type, {
       expression: schedule.expression,
       runAt: schedule.runAt,
+      isolated: schedule.isolated,
       channelInfo,
       timezone: schedulerConfig?.timezone,
     });
@@ -2276,6 +2298,7 @@ async function executeScheduleFromResponse(
     const typeLabel = getTypeLabel(schedule.type, {
       expression: schedule.expression,
       runAt: schedule.runAt,
+      isolated: schedule.isolated,
       channelInfo,
       timezone: schedulerConfig?.timezone,
     });
