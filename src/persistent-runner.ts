@@ -45,6 +45,7 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
 
   private model?: string;
   private timeoutMs: number;
+  private currentTimeout: ReturnType<typeof setTimeout> | null = null;
   private workdir?: string;
   private skipPermissions: boolean;
   private systemPrompt: string;
@@ -247,6 +248,8 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
           `[persistent-runner] Compact detected: trigger=${trigger}, pre_tokens=${preTokens}`
         );
         this.currentItem?.callbacks?.onCompact?.(trigger, preTokens);
+        // compact中はタイムアウトをリセット（圧縮に時間がかかるため）
+        this.resetTimeout();
       }
     }
 
@@ -307,6 +310,52 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
   }
 
   /**
+   * タイムアウトタイマーを開始
+   */
+  private startTimeout(): void {
+    this.clearCurrentTimeout();
+    this.currentTimeout = setTimeout(() => {
+      if (this.currentItem) {
+        console.warn(
+          `[persistent-runner] Request timed out after ${this.timeoutMs}ms. Killing process.`
+        );
+        const error = new Error(`Request timed out after ${this.timeoutMs}ms`);
+        this.currentItem.callbacks?.onError?.(error);
+        this.currentItem.reject(error);
+        this.currentItem = null;
+
+        // タイムアウト時はプロセスをkillして次のリクエスト用に再起動
+        if (this.process) {
+          this.process.kill();
+          this.process = null;
+          this.processAlive = false;
+          this.buffer = '';
+        }
+
+        this.processNext();
+      }
+    }, this.timeoutMs);
+  }
+
+  /**
+   * タイムアウトタイマーをクリア
+   */
+  private clearCurrentTimeout(): void {
+    if (this.currentTimeout) {
+      clearTimeout(this.currentTimeout);
+      this.currentTimeout = null;
+    }
+  }
+
+  /**
+   * タイムアウトタイマーをリセット（compact等で時間がかかる場合に延長）
+   */
+  private resetTimeout(): void {
+    console.log(`[persistent-runner] Timeout reset (${this.timeoutMs}ms)`);
+    this.startTimeout();
+  }
+
+  /**
    * キューから次のリクエストを処理
    */
   private processNext(): void {
@@ -345,40 +394,19 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     proc.stdin?.write(JSON.stringify(message) + '\n');
 
     // タイムアウト設定: タイムアウト時はプロセスをkillして状態をクリーンに
-    const timeout = setTimeout(() => {
-      if (this.currentItem) {
-        console.warn(
-          `[persistent-runner] Request timed out after ${this.timeoutMs}ms. Killing process.`
-        );
-        const error = new Error(`Request timed out after ${this.timeoutMs}ms`);
-        this.currentItem.callbacks?.onError?.(error);
-        this.currentItem.reject(error);
-        this.currentItem = null;
-
-        // タイムアウト時はプロセスをkillして次のリクエスト用に再起動
-        // これにより、古いリクエストの出力が新しいリクエストに混ざるのを防ぐ
-        if (this.process) {
-          this.process.kill();
-          this.process = null;
-          this.processAlive = false;
-          this.buffer = '';
-        }
-
-        this.processNext();
-      }
-    }, this.timeoutMs);
+    this.startTimeout();
 
     // タイムアウトをクリアするためにresolve/rejectをラップ
     const originalResolve = this.currentItem.resolve;
     const originalReject = this.currentItem.reject;
 
     this.currentItem.resolve = (result) => {
-      clearTimeout(timeout);
+      this.clearCurrentTimeout();
       originalResolve(result);
     };
 
     this.currentItem.reject = (error) => {
-      clearTimeout(timeout);
+      this.clearCurrentTimeout();
       originalReject(error);
     };
   }
