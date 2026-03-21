@@ -1294,7 +1294,7 @@ async function main() {
           // 結果を送信
           const filePaths = extractFilePaths(result);
           const displayText = filePaths.length > 0 ? stripFilePaths(result) : result;
-          const cleanedDisplay = displayText.trim();
+          const cleanedDisplay = stripCommandsFromDisplay(displayText).trim();
 
           // 空応答、[SILENT] マーカー、またはスキップ応答パターンの場合はスキップ
           const isSilent =
