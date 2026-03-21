@@ -404,6 +404,9 @@ async function main() {
         } else {
           errorDetail = `❌ エラー: ${errorMsg.slice(0, 200)}`;
         }
+        // メタ情報を付加（デバッグ用）
+        const sid = getSession(channelId);
+        if (sid) errorDetail += `\n\`[session: ${sid.slice(0, 8)}]\``;
         await interaction.editReply(errorDetail).catch(() => {});
       }
       return;
@@ -1222,114 +1225,134 @@ async function main() {
     });
 
     // スケジューラにエージェント実行関数を登録
-    scheduler.registerAgentRunner('discord', async (prompt, channelId, options) => {
-      const channel = await client.channels.fetch(channelId);
-      if (!channel || !('send' in channel)) {
-        throw new Error(`Channel not found: ${channelId}`);
-      }
-
-      // プロンプト内の !discord send コマンドを先に直接実行
-      // （AIに渡すとコマンドが応答に含まれず実行されないため）
-      const promptCommands = extractDiscordSendFromPrompt(prompt);
-      for (const cmd of promptCommands.commands) {
-        console.log(`[scheduler] Executing discord command from prompt: ${cmd.slice(0, 80)}...`);
-        await handleDiscordCommand(cmd, undefined, channelId);
-      }
-
-      // !discord send 以外のテキストが残っていればAIに渡す
-      const remainingPrompt = promptCommands.remaining.trim();
-      if (!remainingPrompt) {
-        // コマンドのみのプロンプトだった場合、AIは不要
-        console.log('[scheduler] Prompt contained only discord commands, skipping agent');
-        return promptCommands.commands.map((c) => `✅ ${c.slice(0, 50)}`).join('\n');
-      }
-
-      try {
-        // isolated=trueならセッションIDを渡さない → 毎回新規セッション
-        const sessionId = options?.isolated ? undefined : getSession(channelId);
-        const { result, sessionId: newSessionId } = await agentRunner.run(remainingPrompt, {
-          skipPermissions: config.agent.config.skipPermissions ?? false,
-          sessionId,
-          channelId,
-        });
-
-        // isolatedの場合はセッションを保存しない（使い捨て）
-        if (!options?.isolated) {
-          setSession(channelId, newSessionId);
+    scheduler.registerAgentRunner(
+      'discord',
+      async (
+        prompt,
+        channelId,
+        options?: { isolated?: boolean; scheduleId?: string; scheduleLabel?: string }
+      ) => {
+        const channel = await client.channels.fetch(channelId);
+        if (!channel || !('send' in channel)) {
+          throw new Error(`Channel not found: ${channelId}`);
         }
 
-        // AI応答内の !discord コマンドを処理（sourceMessage なし、channelIdをフォールバック）
-        const feedbackResults = await handleDiscordCommandsInResponse(result, undefined, channelId);
+        // プロンプト内の !discord send コマンドを先に直接実行
+        // （AIに渡すとコマンドが応答に含まれず実行されないため）
+        const promptCommands = extractDiscordSendFromPrompt(prompt);
+        for (const cmd of promptCommands.commands) {
+          console.log(`[scheduler] Executing discord command from prompt: ${cmd.slice(0, 80)}...`);
+          await handleDiscordCommand(cmd, undefined, channelId);
+        }
 
-        // フィードバック結果があればエージェントに再注入
-        if (feedbackResults.length > 0) {
-          const feedbackPrompt = `あなたが実行したコマンドの結果が返ってきました。この情報を踏まえて、元の会話の文脈に沿ってユーザーに返答してください。\n\n${feedbackResults.join('\n\n')}`;
-          console.log(
-            `[scheduler] Re-injecting ${feedbackResults.length} feedback result(s) to agent`
-          );
-          const feedbackSession = getSession(channelId);
-          const feedbackRun = await agentRunner.run(feedbackPrompt, {
+        // !discord send 以外のテキストが残っていればAIに渡す
+        const remainingPrompt = promptCommands.remaining.trim();
+        if (!remainingPrompt) {
+          // コマンドのみのプロンプトだった場合、AIは不要
+          console.log('[scheduler] Prompt contained only discord commands, skipping agent');
+          return promptCommands.commands.map((c) => `✅ ${c.slice(0, 50)}`).join('\n');
+        }
+
+        try {
+          // isolated=trueならセッションIDを渡さない → 毎回新規セッション
+          const sessionId = options?.isolated ? undefined : getSession(channelId);
+          const { result, sessionId: newSessionId } = await agentRunner.run(remainingPrompt, {
             skipPermissions: config.agent.config.skipPermissions ?? false,
-            sessionId: feedbackSession,
+            sessionId,
             channelId,
           });
-          setSession(channelId, feedbackRun.sessionId);
-          // 再注入後の応答にもコマンドがあれば処理
-          await handleDiscordCommandsInResponse(feedbackRun.result, undefined, channelId);
-        }
 
-        // 結果を送信
-        const filePaths = extractFilePaths(result);
-        const displayText = filePaths.length > 0 ? stripFilePaths(result) : result;
-        const cleanedDisplay = displayText.trim();
-
-        // 空応答、[SILENT] マーカー、またはスキップ応答パターンの場合はスキップ
-        const isSilent =
-          !cleanedDisplay ||
-          cleanedDisplay.includes('[SILENT]') ||
-          (cleanedDisplay.length < 80 &&
-            /(?:quiet\s*hours|NO_SPEAK|スキップ|終了|セッション継続)/i.test(cleanedDisplay));
-        if (isSilent && filePaths.length === 0) {
-          return result;
-        }
-
-        // 2000文字超の応答は分割送信
-        const textChunks = splitMessage(cleanedDisplay, DISCORD_SAFE_LENGTH);
-        const ch = channel as { send: (content: string) => Promise<unknown> };
-        for (const chunk of textChunks) {
-          await ch.send(chunk || '✅');
-        }
-
-        if (filePaths.length > 0) {
-          await (
-            channel as { send: (options: { files: { attachment: string }[] }) => Promise<unknown> }
-          ).send({
-            files: filePaths.map((fp) => ({ attachment: fp })),
-          });
-        }
-
-        return result;
-      } catch (error) {
-        const ch = channel as { send: (content: string) => Promise<unknown> };
-        if (error instanceof Error && error.message === 'Request cancelled by user') {
-          await ch.send('🛑 タスクを停止しました');
-        } else {
-          const errorMsg = error instanceof Error ? error.message : String(error);
-          let errorDetail: string;
-          if (errorMsg.includes('timed out')) {
-            errorDetail = `⏱️ タイムアウトしました`;
-          } else if (errorMsg.includes('Process exited unexpectedly')) {
-            errorDetail = `💥 AIプロセスが予期せず終了しました`;
-          } else if (errorMsg.includes('Circuit breaker')) {
-            errorDetail = '🔌 AIプロセスが一時停止中です';
-          } else {
-            errorDetail = `❌ エラー: ${errorMsg.slice(0, 200)}`;
+          // isolatedの場合はセッションを保存しない（使い捨て）
+          if (!options?.isolated) {
+            setSession(channelId, newSessionId);
           }
-          await ch.send(errorDetail);
+
+          // AI応答内の !discord コマンドを処理（sourceMessage なし、channelIdをフォールバック）
+          const feedbackResults = await handleDiscordCommandsInResponse(
+            result,
+            undefined,
+            channelId
+          );
+
+          // フィードバック結果があればエージェントに再注入
+          if (feedbackResults.length > 0) {
+            const feedbackPrompt = `あなたが実行したコマンドの結果が返ってきました。この情報を踏まえて、元の会話の文脈に沿ってユーザーに返答してください。\n\n${feedbackResults.join('\n\n')}`;
+            console.log(
+              `[scheduler] Re-injecting ${feedbackResults.length} feedback result(s) to agent`
+            );
+            const feedbackSession = getSession(channelId);
+            const feedbackRun = await agentRunner.run(feedbackPrompt, {
+              skipPermissions: config.agent.config.skipPermissions ?? false,
+              sessionId: feedbackSession,
+              channelId,
+            });
+            setSession(channelId, feedbackRun.sessionId);
+            // 再注入後の応答にもコマンドがあれば処理
+            await handleDiscordCommandsInResponse(feedbackRun.result, undefined, channelId);
+          }
+
+          // 結果を送信
+          const filePaths = extractFilePaths(result);
+          const displayText = filePaths.length > 0 ? stripFilePaths(result) : result;
+          const cleanedDisplay = displayText.trim();
+
+          // 空応答、[SILENT] マーカー、またはスキップ応答パターンの場合はスキップ
+          const isSilent =
+            !cleanedDisplay ||
+            cleanedDisplay.includes('[SILENT]') ||
+            (cleanedDisplay.length < 80 &&
+              /(?:quiet\s*hours|NO_SPEAK|スキップ|終了|セッション継続)/i.test(cleanedDisplay));
+          if (isSilent && filePaths.length === 0) {
+            return result;
+          }
+
+          // 2000文字超の応答は分割送信
+          const textChunks = splitMessage(cleanedDisplay, DISCORD_SAFE_LENGTH);
+          const ch = channel as { send: (content: string) => Promise<unknown> };
+          for (const chunk of textChunks) {
+            await ch.send(chunk || '✅');
+          }
+
+          if (filePaths.length > 0) {
+            await (
+              channel as {
+                send: (options: { files: { attachment: string }[] }) => Promise<unknown>;
+              }
+            ).send({
+              files: filePaths.map((fp) => ({ attachment: fp })),
+            });
+          }
+
+          return result;
+        } catch (error) {
+          const ch = channel as { send: (content: string) => Promise<unknown> };
+          if (error instanceof Error && error.message === 'Request cancelled by user') {
+            await ch.send('🛑 タスクを停止しました');
+          } else {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            let errorDetail: string;
+            if (errorMsg.includes('timed out')) {
+              errorDetail = `⏱️ タイムアウトしました`;
+            } else if (errorMsg.includes('Process exited unexpectedly')) {
+              errorDetail = `💥 AIプロセスが予期せず終了しました`;
+            } else if (errorMsg.includes('Circuit breaker')) {
+              errorDetail = '🔌 AIプロセスが一時停止中です';
+            } else {
+              errorDetail = `❌ エラー: ${errorMsg.slice(0, 200)}`;
+            }
+            // メタ情報を付加（デバッグ用）
+            const meta: string[] = [];
+            if (options?.scheduleId)
+              meta.push(`schedule: ${options.scheduleLabel || options.scheduleId}`);
+            const sid = getSession(channelId);
+            if (sid) meta.push(`session: ${sid.slice(0, 8)}`);
+            if (meta.length > 0) errorDetail += `\n\`[${meta.join(' | ')}]\``;
+            await ch.send(errorDetail);
+          }
+          throw error;
         }
-        throw error;
       }
-    });
+    );
   }
 
   // Slackボットを起動
@@ -1831,6 +1854,9 @@ async function processPrompt(
     } else {
       errorDetail = `❌ エラーが発生しました: ${errorMsg.slice(0, 200)}`;
     }
+    // メタ情報を付加（デバッグ用）
+    const sid = getSession(channelId);
+    if (sid) errorDetail += `\n\`[session: ${sid.slice(0, 8)}]\``;
 
     // エラー詳細を表示
     await message.reply(errorDetail).catch(() => {});

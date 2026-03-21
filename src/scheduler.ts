@@ -49,7 +49,11 @@ export interface SendMessageFn {
   (channelId: string, message: string): Promise<void>;
 }
 export interface AgentRunFn {
-  (prompt: string, channelId: string, options?: { isolated?: boolean }): Promise<string>;
+  (
+    prompt: string,
+    channelId: string,
+    options?: { isolated?: boolean; scheduleId?: string; scheduleLabel?: string }
+  ): Promise<string>;
 }
 // ─── Scheduler ───────────────────────────────────────────────────────
 export class Scheduler {
@@ -423,6 +427,8 @@ export class Scheduler {
       this.log(`[scheduler] Running agent for: ${schedule.id}`);
       const result = await agentRunner(schedule.message, schedule.channelId, {
         isolated: schedule.isolated,
+        scheduleId: schedule.id,
+        scheduleLabel: schedule.label,
       });
       this.log(`[scheduler] Agent completed: ${schedule.id} (${result.length} chars)`);
     } catch (error) {
