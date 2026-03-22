@@ -2,5 +2,6 @@
 export function cleanEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   delete env.CLAUDECODE;
+  env.XANGI_SESSION = '1';
   return env;
 }
