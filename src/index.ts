@@ -1257,6 +1257,11 @@ async function main() {
             setSession(channelId, newSessionId);
           }
 
+          // AI応答内に !discord send でこのチャンネルへの送信があるか事前チェック
+          const hasSendToSameChannel = new RegExp(`^!discord\\s+send\\s+<#${channelId}>`, 'm').test(
+            result
+          );
+
           // AI応答内の !discord コマンドを処理（sourceMessage なし、channelIdをフォールバック）
           const feedbackResults = await handleDiscordCommandsInResponse(
             result,
@@ -1293,6 +1298,14 @@ async function main() {
             (cleanedDisplay.length < 80 &&
               /(?:quiet\s*hours|NO_SPEAK|スキップ|終了|セッション継続)/i.test(cleanedDisplay));
           if (isSilent && filePaths.length === 0) {
+            return result;
+          }
+
+          // !discord send で同じチャンネルに既に送信済みなら、後段のテキスト送信をスキップ（二重送信防止）
+          if (hasSendToSameChannel && filePaths.length === 0) {
+            console.log(
+              `[scheduler] Skipping duplicate text send for ${options?.scheduleId ?? 'unknown'}: already sent via !discord send`
+            );
             return result;
           }
 
