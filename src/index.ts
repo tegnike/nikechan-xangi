@@ -1304,13 +1304,15 @@ async function main() {
             console.log(
               `[scheduler] Re-injecting ${feedbackResults.length} feedback result(s) to agent`
             );
-            const feedbackSession = getSession(channelId);
+            const feedbackSession = options?.isolated ? newSessionId : getSession(channelId);
             const feedbackRun = await agentRunner.run(feedbackPrompt, {
               skipPermissions: config.agent.config.skipPermissions ?? false,
               sessionId: feedbackSession,
               channelId,
             });
-            setSession(channelId, feedbackRun.sessionId);
+            if (!options?.isolated) {
+              setSession(channelId, feedbackRun.sessionId);
+            }
             // 再注入後の応答にもコマンドがあれば処理
             await handleDiscordCommandsInResponse(feedbackRun.result, undefined, channelId);
           }
