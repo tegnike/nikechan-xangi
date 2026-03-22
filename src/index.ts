@@ -862,7 +862,8 @@ async function main() {
   async function handleDiscordCommandsInResponse(
     text: string,
     sourceMessage?: Message,
-    fallbackChannelId?: string
+    fallbackChannelId?: string,
+    skipChannelId?: string
   ): Promise<string[]> {
     const lines = text.split('\n');
     let inCodeBlock = false;
@@ -890,6 +891,29 @@ async function main() {
       // !discord send の複数行対応
       const sendMatch = trimmed.match(/^!discord\s+send\s+<#(\d+)>\s*(.*)/);
       if (sendMatch) {
+        // 同チャンネルへの送信はスキップ（processPromptのストリーミングで既に送信済み → 二重送信防止）
+        if (skipChannelId && sendMatch[1] === skipChannelId) {
+          console.log(
+            `[xangi] Skipping !discord send to same channel <#${skipChannelId}> (already sent via streaming)`
+          );
+          // コマンドの本文行をスキップ（次のコマンド行まで読み飛ばす）
+          i++;
+          let inSkipCodeBlock = false;
+          while (i < lines.length) {
+            const skipLine = lines[i];
+            if (skipLine.trim().startsWith('```')) {
+              inSkipCodeBlock = !inSkipCodeBlock;
+            }
+            if (
+              !inSkipCodeBlock &&
+              (skipLine.trim().startsWith('!discord ') || skipLine.trim().startsWith('!schedule'))
+            ) {
+              break;
+            }
+            i++;
+          }
+          continue;
+        }
         const firstLineContent = sendMatch[2] ?? '';
 
         if (firstLineContent.trim() === '') {
@@ -1147,7 +1171,12 @@ async function main() {
 
         // AIの応答から !discord コマンドを検知して実行
         if (result) {
-          const feedbackResults = await handleDiscordCommandsInResponse(result, message);
+          const feedbackResults = await handleDiscordCommandsInResponse(
+            result,
+            message,
+            undefined,
+            channelId
+          );
 
           // フィードバック結果があればエージェントに再注入（新しいreplyは作らない）
           if (feedbackResults.length > 0) {
@@ -1717,6 +1746,8 @@ async function processPrompt(
       const PARTIAL_SEND_DELAY_MS = 5000;
       let partialTimer: ReturnType<typeof setTimeout> | null = null;
       let isFirstReply = true;
+      // sendPartialText の実行中 Promise を追跡（レースコンディション防止）
+      let pendingSend: Promise<void> | null = null;
 
       const sendPartialText = async (text: string) => {
         // 未送信分を抽出して送信
@@ -1726,18 +1757,22 @@ async function processPrompt(
         const cleaned = stripCommandsFromDisplay(stripFilePaths(unsent));
         if (!cleaned.trim()) return;
 
+        // sentLength・isFirstReply を Discord送信前に同期的に更新
+        // （result イベントが先に到着して Phase 2 が走るレースコンディション防止）
+        const wasFirstReply = isFirstReply;
+        sentLength = text.length;
+        isFirstReply = false;
+
         const chunks = splitMessage(cleaned, DISCORD_SAFE_LENGTH);
         for (const chunk of chunks) {
-          if (isFirstReply) {
+          if (wasFirstReply && chunk === chunks[0]) {
             await message.reply(chunk).catch(() => {});
-            isFirstReply = false;
           } else if ('send' in message.channel) {
             await (message.channel as unknown as { send: (c: string) => Promise<unknown> })
               .send(chunk)
               .catch(() => {});
           }
         }
-        sentLength = text.length;
       };
 
       const streamResult = await agentRunner.runStream(
@@ -1750,7 +1785,7 @@ async function processPrompt(
             // テキスト受信のたびにタイマーリセット
             if (partialTimer) clearTimeout(partialTimer);
             partialTimer = setTimeout(() => {
-              sendPartialText(fullText);
+              pendingSend = sendPartialText(fullText);
             }, PARTIAL_SEND_DELAY_MS);
           },
           onCompact: () => {
@@ -1765,6 +1800,8 @@ async function processPrompt(
       );
       // タイマーが残っていればクリア
       if (partialTimer) clearTimeout(partialTimer);
+      // 送信中のPartial送信を待ってからsentLengthを確定させる（二重送信防止）
+      if (pendingSend) await pendingSend;
 
       result = streamResult.result;
       newSessionId = streamResult.sessionId;
