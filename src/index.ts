@@ -1062,8 +1062,11 @@ async function main() {
 
     const isMentioned = message.mentions.has(client.user!);
     const isDM = !message.guild;
+    const parentId = 'parentId' in message.channel ? message.channel.parentId : null;
     const isAutoReplyChannel =
-      config.discord.autoReplyChannels?.includes(message.channel.id) ?? false;
+      (config.discord.autoReplyChannels?.includes(message.channel.id) ||
+        (parentId && config.discord.autoReplyChannels?.includes(parentId))) ??
+      false;
 
     console.log(
       `[xangi:debug] MessageCreate: msgId=${message.id}, channelId=${message.channel.id}, channelType=${message.channel.type}, parentId=${'parentId' in message.channel ? message.channel.parentId : 'N/A'}, content="${message.content.slice(0, 50)}", isMentioned=${isMentioned}, isAutoReply=${isAutoReplyChannel}`
