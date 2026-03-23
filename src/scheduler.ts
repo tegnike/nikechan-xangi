@@ -39,6 +39,8 @@ export interface Schedule {
   intervalMs?: number;
   /** 独立セッションで実行するか（cron用） */
   isolated?: boolean;
+  /** 新規スレッドで実行するか（Discord用） */
+  thread?: boolean;
   /** アクティブ時間帯（heartbeat用、この範囲外はスキップ） */
   activeHours?: {
     start: string; // "HH:MM" (inclusive)
@@ -52,7 +54,7 @@ export interface AgentRunFn {
   (
     prompt: string,
     channelId: string,
-    options?: { isolated?: boolean; scheduleId?: string; scheduleLabel?: string }
+    options?: { isolated?: boolean; thread?: boolean; scheduleId?: string; scheduleLabel?: string }
   ): Promise<string>;
 }
 // ─── Scheduler ───────────────────────────────────────────────────────
@@ -427,6 +429,7 @@ export class Scheduler {
       this.log(`[scheduler] Running agent for: ${schedule.id}`);
       const result = await agentRunner(schedule.message, schedule.channelId, {
         isolated: schedule.isolated,
+        thread: schedule.thread,
         scheduleId: schedule.id,
         scheduleLabel: schedule.label,
       });
@@ -522,8 +525,9 @@ export function formatScheduleList(
     } else if (s.type === 'cron' && s.expression) {
       const humanReadable = cronToHuman(s.expression);
       const isolatedMark = s.isolated ? ' 🔒独立' : '';
+      const threadMark = s.thread ? ' 🧵スレッド' : '';
       return (
-        `**${i + 1}.** ${status} 📅 ${humanReadable}${isolatedMark}${label}\n` +
+        `**${i + 1}.** ${status} 📅 ${humanReadable}${isolatedMark}${threadMark}${label}\n` +
         `└ 📝 ${s.message}\n` +
         `└ 📢 ${channelMention}\n` +
         `└ 🔄 \`${s.expression}\`\n` +

@@ -1249,11 +1249,32 @@ async function main() {
       async (
         prompt,
         channelId,
-        options?: { isolated?: boolean; scheduleId?: string; scheduleLabel?: string }
+        options?: {
+          isolated?: boolean;
+          thread?: boolean;
+          scheduleId?: string;
+          scheduleLabel?: string;
+        }
       ) => {
-        const channel = await client.channels.fetch(channelId);
-        if (!channel || !('send' in channel)) {
+        const parentChannel = await client.channels.fetch(channelId);
+        if (!parentChannel || !('send' in parentChannel)) {
           throw new Error(`Channel not found: ${channelId}`);
+        }
+
+        // thread: true の場合、新規スレッドを作成して送信先を切り替え
+        let channel = parentChannel;
+        let threadId: string | undefined;
+        if (options?.thread && 'threads' in parentChannel) {
+          const threadName = options.scheduleLabel || 'スケジュール実行';
+          const now = new Date();
+          const timestamp = `${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+          const thread = await (parentChannel as import('discord.js').TextChannel).threads.create({
+            name: `${threadName} (${timestamp})`,
+            autoArchiveDuration: 1440, // 24時間で自動アーカイブ
+          });
+          channel = thread;
+          threadId = thread.id;
+          console.log(`[scheduler] Created thread: ${thread.name} (${thread.id})`);
         }
 
         // プロンプト内の !discord send コマンドを先に直接実行
@@ -1281,9 +1302,12 @@ async function main() {
             channelId,
           });
 
-          // isolatedの場合はセッションを保存しない（使い捨て）
+          // isolatedの場合は親チャンネルのセッションを保存しない
+          // ただしスレッドがある場合はスレッドIDにセッションを保存（スレッド内で会話継続可能に）
           if (!options?.isolated) {
             setSession(channelId, newSessionId);
+          } else if (threadId) {
+            setSession(threadId, newSessionId);
           }
 
           // AI応答内に !discord send でこのチャンネルへの送信があるか事前チェック
@@ -1312,6 +1336,8 @@ async function main() {
             });
             if (!options?.isolated) {
               setSession(channelId, feedbackRun.sessionId);
+            } else if (threadId) {
+              setSession(threadId, feedbackRun.sessionId);
             }
             // 再注入後の応答にもコマンドがあれば処理
             await handleDiscordCommandsInResponse(feedbackRun.result, undefined, channelId);
