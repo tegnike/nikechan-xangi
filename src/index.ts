@@ -1296,13 +1296,19 @@ async function main() {
           return promptCommands.commands.map((c) => `✅ ${c.slice(0, 50)}`).join('\n');
         }
 
+        // isolated=trueの場合、ユニークなchannelIdで独立したrunnerを使う
+        // 同じchannelIdのrunnerを共有するとセッションがつながってしまうため
+        const runnerChannelId = options?.isolated
+          ? `${channelId}_isolated_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+          : channelId;
+
         try {
           // isolated=trueならセッションIDを渡さない → 毎回新規セッション
           const sessionId = options?.isolated ? undefined : getSession(channelId);
           const { result, sessionId: newSessionId } = await agentRunner.run(remainingPrompt, {
             skipPermissions: config.agent.config.skipPermissions ?? false,
             sessionId,
-            channelId,
+            channelId: runnerChannelId,
           });
 
           // isolatedの場合は親チャンネルのセッションを保存しない
@@ -1335,7 +1341,7 @@ async function main() {
             const feedbackRun = await agentRunner.run(feedbackPrompt, {
               skipPermissions: config.agent.config.skipPermissions ?? false,
               sessionId: feedbackSession,
-              channelId,
+              channelId: runnerChannelId,
             });
             if (!options?.isolated) {
               setSession(channelId, feedbackRun.sessionId);
@@ -1413,6 +1419,11 @@ async function main() {
             await ch.send(errorDetail);
           }
           throw error;
+        } finally {
+          // isolated用の一時runnerを破棄してリソースを解放
+          if (options?.isolated && runnerChannelId !== channelId) {
+            agentRunner.destroy?.(runnerChannelId);
+          }
         }
       }
     );
