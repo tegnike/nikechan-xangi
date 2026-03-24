@@ -1364,6 +1364,11 @@ async function main() {
             (cleanedDisplay.length < 80 &&
               /(?:quiet\s*hours|NO_SPEAK|スキップ|終了|セッション継続)/i.test(cleanedDisplay));
           if (isSilent && filePaths.length === 0) {
+            // スレッドが作成済みの場合はスキップ理由を送信（空スレッド防止）
+            if (threadId) {
+              const ch = channel as { send: (content: string) => Promise<unknown> };
+              await ch.send('スキップしました');
+            }
             return result;
           }
 
