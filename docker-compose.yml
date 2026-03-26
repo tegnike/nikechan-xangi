@@ -1,34 +1,22 @@
 # 共通設定
 x-common: &common
   restart: unless-stopped
+  env_file:
+    - ../.env.xangi
   volumes:
     # Claude Code CLI 認証情報（コンテナ専用ボリューム）
     - claude-data:/home/node/.claude
     # Codex CLI 認証情報（コンテナ専用ボリューム）
     - codex-data:/home/node/.codex
-    # ワークスペース（エージェントの作業ディレクトリ）
-    - ${WORKSPACE_PATH:-./workspace}:/workspace
+    # ワークスペース（nikechanリポジトリ全体）
+    - ${WORKSPACE_PATH:-..}:/workspace
     # Git設定
     - ~/.gitconfig:/home/node/.gitconfig:ro
   environment: &common-env
     # GitHub CLI (GH_TOKEN環境変数で認証)
     - GH_TOKEN=${GH_TOKEN:-}
     - NODE_ENV=production
-    # Discord
-    - DISCORD_TOKEN=${DISCORD_TOKEN:-}
-    - AUTO_REPLY_CHANNELS=${AUTO_REPLY_CHANNELS:-}
-    - DISCORD_STREAMING=${DISCORD_STREAMING:-true}
-    - DISCORD_SHOW_THINKING=${DISCORD_SHOW_THINKING:-true}
-    # Slack
-    - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
-    - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
-    - SLACK_AUTO_REPLY_CHANNELS=${SLACK_AUTO_REPLY_CHANNELS:-}
-    - SLACK_REPLY_IN_THREAD=${SLACK_REPLY_IN_THREAD:-true}
-    - SLACK_STREAMING=${SLACK_STREAMING:-true}
-    - SLACK_SHOW_THINKING=${SLACK_SHOW_THINKING:-true}
-    # Common
-    - DISCORD_ALLOWED_USER=${DISCORD_ALLOWED_USER:-}
-    - SLACK_ALLOWED_USER=${SLACK_ALLOWED_USER:-}
+    # コンテナ内のワークスペースパス
     - WORKSPACE_PATH=/workspace
     - SKIP_PERMISSIONS=${SKIP_PERMISSIONS:-false}
     # Agent

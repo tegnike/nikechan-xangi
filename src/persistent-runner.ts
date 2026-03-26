@@ -51,6 +51,8 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
   private systemPrompt: string;
   private sessionInitPrompt?: string;
   private resumeSessionId?: string; // プロセス再起動時に --resume で復元するセッションID
+  private failedSessionIds = new Set<string>(); // 復元に失敗したセッションIDを記憶
+  private pendingSessionRecovery = false; // is_errorからclose経由でリカバリするフラグ
 
   constructor(options?: {
     model?: string;
@@ -108,9 +110,15 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
 
     // セッション復元: 保存済みセッションIDがあれば --resume で継続
     const resumeId = this.resumeSessionId || this.sessionId;
-    if (resumeId) {
+    if (resumeId && !this.failedSessionIds.has(resumeId)) {
       args.push('--resume', resumeId);
       console.log(`[persistent-runner] Resuming session: ${resumeId.slice(0, 8)}...`);
+    } else if (resumeId && this.failedSessionIds.has(resumeId)) {
+      console.log(
+        `[persistent-runner] Skipping failed session: ${resumeId.slice(0, 8)}, starting new session`
+      );
+      this.resumeSessionId = undefined;
+      this.sessionId = '';
     }
 
     args.push('--append-system-prompt', this.systemPrompt);
@@ -148,8 +156,15 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
       this.processAlive = false;
       this.buffer = ''; // バッファをクリア
 
-      // シャットダウン中またはキャンセル中なら正常終了
+      // シャットダウン中なら正常終了
       if (wasShuttingDown) {
+        return;
+      }
+      // セッション復元リカバリ中: クラッシュ扱いせず新規セッションで再試行
+      if (this.pendingSessionRecovery) {
+        this.pendingSessionRecovery = false;
+        console.log('[persistent-runner] Session recovery: starting new session...');
+        this.processNext();
         return;
       }
       if (this.cancelling) {
@@ -158,6 +173,24 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
         if (this.queue.length > 0) {
           this.processNext();
         }
+        return;
+      }
+
+      // セッション復元中にクラッシュした場合、セッションIDを失敗リストに追加して新規セッションで再試行
+      const failedId = this.resumeSessionId || this.sessionId;
+      if (failedId && !this.failedSessionIds.has(failedId)) {
+        console.log(
+          `[persistent-runner] Session resume crashed for ${failedId.slice(0, 8)}. Marking as failed and retrying with new session...`
+        );
+        this.failedSessionIds.add(failedId);
+        this.resumeSessionId = undefined;
+        this.sessionId = '';
+        // 現在処理中のリクエストをキューの先頭に戻して再試行
+        if (this.currentItem) {
+          this.queue.unshift(this.currentItem);
+          this.currentItem = null;
+        }
+        this.processNext();
         return;
       }
 
@@ -282,6 +315,26 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
       }
 
       if (json.is_error) {
+        // セッション復元中のエラー: セッションIDを失敗リストに追加して新規セッションで再試行
+        const failedId = this.resumeSessionId || this.sessionId;
+        if (failedId && !this.failedSessionIds.has(failedId)) {
+          console.log(
+            `[persistent-runner] Session resume error detected for ${failedId.slice(0, 8)}. Marking as failed and retrying with new session...`
+          );
+          this.failedSessionIds.add(failedId);
+          this.resumeSessionId = undefined;
+          this.sessionId = '';
+          // 現在のリクエストをキューの先頭に戻す
+          if (this.currentItem) {
+            this.queue.unshift(this.currentItem);
+            this.currentItem = null;
+          }
+          // フラグを立ててプロセスをkill → closeイベントでprocessNextが呼ばれる
+          this.pendingSessionRecovery = true;
+          this.process?.kill();
+          return;
+        }
+
         const error = new Error(json.result || 'Unknown error');
         this.currentItem?.callbacks?.onError?.(error);
         this.currentItem?.reject(error);
