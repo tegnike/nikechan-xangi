@@ -10,6 +10,14 @@ x-common: &common
     - codex-data:/home/node/.codex
     # ワークスペース（nikechanリポジトリ全体）
     - ${WORKSPACE_PATH:-..}:/workspace
+    # ローカル専用スキル（l-*）を空ボリュームで隠す
+    - /workspace/.claude/skills/l-crypto-check
+    - /workspace/.claude/skills/l-license-checker
+    - /workspace/.claude/skills/l-local-scan
+    - /workspace/.claude/skills/l-marp-slides
+    - /workspace/.claude/skills/l-openclaw
+    - /workspace/.claude/skills/l-tech-news-curation
+    - /workspace/.claude/skills/l-workspace-rag
     # Git設定
     - ~/.gitconfig:/home/node/.gitconfig:ro
   environment: &common-env
