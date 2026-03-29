@@ -1,13 +1,5 @@
-import {
-  readFileSync,
-  writeFileSync,
-  mkdirSync,
-  existsSync,
-  watchFile,
-  unwatchFile,
-  renameSync,
-  unlinkSync,
-} from 'fs';
+import { readFileSync, mkdirSync, existsSync, watchFile, unwatchFile } from 'fs';
+import { readFile, writeFile, rename, access, unlink, mkdir } from 'fs/promises';
 import { dirname, join } from 'path';
 import cron from 'node-cron';
 /** スケジュール一覧の項目間区切り（splitMessage用） */
@@ -73,6 +65,9 @@ export class Scheduler {
   private quiet: boolean;
   private disabled = false;
   private timezone: string;
+  private heartbeatMdCache: string | null = null;
+  private heartbeatMdWatching = false;
+  private pendingSave: Promise<void> = Promise.resolve();
   constructor(dataDir?: string, options?: { quiet?: boolean; timezone?: string }) {
     this.quiet = options?.quiet ?? false;
     this.timezone = options?.timezone ?? 'Asia/Tokyo';
@@ -82,6 +77,26 @@ export class Scheduler {
     }
     this.filePath = join(dir, 'schedules.json');
     this.load();
+    this.initHeartbeatMdCache();
+  }
+  private initHeartbeatMdCache(): void {
+    const heartbeatMdPath = join(dirname(this.filePath), 'heartbeat.md');
+    // 初回読み込み（コンストラクタなので同期OK）
+    if (existsSync(heartbeatMdPath)) {
+      this.heartbeatMdCache = readFileSync(heartbeatMdPath, 'utf-8').trim();
+    }
+    // ファイル変更を監視してキャッシュを更新
+    if (!this.heartbeatMdWatching) {
+      this.heartbeatMdWatching = true;
+      watchFile(heartbeatMdPath, { interval: 5000 }, async () => {
+        try {
+          const content = await readFile(heartbeatMdPath, 'utf-8');
+          this.heartbeatMdCache = content.trim();
+        } catch {
+          this.heartbeatMdCache = null;
+        }
+      });
+    }
   }
   private log(message: string): void {
     if (!this.quiet) {
@@ -273,6 +288,11 @@ export class Scheduler {
     if (!this.watching) return;
     unwatchFile(this.filePath);
     this.watching = false;
+    if (this.heartbeatMdWatching) {
+      const heartbeatMdPath = join(dirname(this.filePath), 'heartbeat.md');
+      unwatchFile(heartbeatMdPath);
+      this.heartbeatMdWatching = false;
+    }
   }
   /**
    * ファイルから再読み込みしてジョブを再起動
@@ -288,17 +308,20 @@ export class Scheduler {
     for (const [id] of this.heartbeatTimers) {
       this.stopJob(id);
     }
-    // 再読み込み
-    this.load();
-    // 有効なジョブを再開（スケジューラ無効時はスキップ）
-    if (!this.disabled) {
-      for (const schedule of this.schedules) {
-        if (schedule.enabled) {
-          this.startJob(schedule);
+    // 非同期で再読み込み
+    this.loadAsync().then(() => {
+      // 有効なジョブを再開（スケジューラ無効時はスキップ）
+      if (!this.disabled) {
+        for (const schedule of this.schedules) {
+          if (schedule.enabled) {
+            this.startJob(schedule);
+          }
         }
       }
-    }
-    this.log(`[scheduler] Reloaded: ${this.schedules.filter((s) => s.enabled).length} active jobs`);
+      this.log(
+        `[scheduler] Reloaded: ${this.schedules.filter((s) => s.enabled).length} active jobs`
+      );
+    });
   }
   private startJob(schedule: Schedule): void {
     // 既に動いていたら止める
@@ -394,12 +417,8 @@ export class Scheduler {
     }
     this.heartbeatRunning.set(schedule.id, true);
     try {
-      // heartbeat.mdがあれば読み込んでプロンプトに前置
-      const heartbeatMdPath = join(dirname(this.filePath), 'heartbeat.md');
-      let checklist = '';
-      if (existsSync(heartbeatMdPath)) {
-        checklist = readFileSync(heartbeatMdPath, 'utf-8').trim();
-      }
+      // heartbeat.mdはキャッシュから読み込み（ファイル監視で自動更新）
+      const checklist = this.heartbeatMdCache ?? '';
       const prompt = checklist
         ? `## Heartbeat Checklist\n${checklist}\n\n## 追加指示\n${schedule.message}\n\n何もアクションが不要なら [SILENT] とだけ返してください。`
         : `${schedule.message}\n\n何もアクションが不要なら [SILENT] とだけ返してください。`;
@@ -439,6 +458,7 @@ export class Scheduler {
     }
   }
   // ─── Persistence ──────────────────────────────────────────────────
+  /** 同期読み込み（コンストラクタ用） */
   private load(): void {
     try {
       if (existsSync(this.filePath)) {
@@ -451,28 +471,49 @@ export class Scheduler {
       this.schedules = [];
     }
   }
-  private save(): void {
+  /** 非同期読み込み（reload用） */
+  private async loadAsync(): Promise<void> {
     try {
-      const dir = dirname(this.filePath);
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true });
-      }
-      this.lastSaveTime = Date.now();
-      // アトミック書き込み: 一時ファイル → リネーム
-      const tmpPath = `${this.filePath}.tmp`;
-      writeFileSync(tmpPath, JSON.stringify(this.schedules, null, 2), 'utf-8');
-      renameSync(tmpPath, this.filePath);
+      await access(this.filePath);
+      const raw = await readFile(this.filePath, 'utf-8');
+      this.schedules = JSON.parse(raw);
+      this.log(`[scheduler] Loaded ${this.schedules.length} schedules from ${this.filePath}`);
     } catch (error) {
+      console.error('[scheduler] Failed to load schedules:', error);
+      this.schedules = [];
+    }
+  }
+  private save(): void {
+    // 非同期で保存（イベントループをブロックしない）
+    this.pendingSave = this.saveAsync().catch((error) => {
       console.error('[scheduler] Failed to save schedules:', error);
+    });
+  }
+  /** 保存完了を待つ（テスト用） */
+  async waitForSave(): Promise<void> {
+    await this.pendingSave;
+  }
+  private async saveAsync(): Promise<void> {
+    const dir = dirname(this.filePath);
+    try {
+      await access(dir);
+    } catch {
+      await mkdir(dir, { recursive: true });
+    }
+    this.lastSaveTime = Date.now();
+    // アトミック書き込み: 一時ファイル → リネーム
+    const tmpPath = `${this.filePath}.tmp`;
+    try {
+      await writeFile(tmpPath, JSON.stringify(this.schedules, null, 2), 'utf-8');
+      await rename(tmpPath, this.filePath);
+    } catch (error) {
       // 一時ファイルが残っていたら削除
-      const tmpPath = `${this.filePath}.tmp`;
       try {
-        if (existsSync(tmpPath)) {
-          unlinkSync(tmpPath);
-        }
+        await unlink(tmpPath);
       } catch {
         // クリーンアップ失敗は無視
       }
+      throw error;
     }
   }
   private generateId(): string {

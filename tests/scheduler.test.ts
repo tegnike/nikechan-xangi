@@ -243,7 +243,7 @@ describe('Scheduler', () => {
     expect(toggledBack?.enabled).toBe(true);
   });
 
-  it('should persist schedules to file', () => {
+  it('should persist schedules to file', async () => {
     scheduler.add({
       type: 'cron',
       expression: '0 9 * * *',
@@ -251,6 +251,9 @@ describe('Scheduler', () => {
       channelId: 'ch1',
       platform: 'discord',
     });
+
+    // 非同期保存の完了を待つ
+    await scheduler.waitForSave();
 
     // 新しいインスタンスで読み込み
     const scheduler2 = new Scheduler(tmpDir);
