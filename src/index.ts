@@ -642,6 +642,44 @@ async function main() {
       }
     }
 
+    // !discord send-image <#channelId> /path/to/image.png メッセージ（任意）
+    // 画像ファイルをチャンネルに送信する。テキスト付きも可
+    const sendImageMatch = text.match(/^!discord\s+send-image\s+<#(\d+)>\s+(\/\S+)(?:\s+(.+))?$/s);
+    if (sendImageMatch) {
+      const [, imgChannelId, filePath, message] = sendImageMatch;
+      try {
+        const { existsSync } = await import('node:fs');
+        if (!existsSync(filePath)) {
+          console.error(`[xangi] File not found: ${filePath}`);
+          return { handled: true, response: `❌ ファイルが見つかりません: ${filePath}` };
+        }
+        const channel = await client.channels.fetch(imgChannelId);
+        if (channel && 'send' in channel) {
+          const typedChannel = channel as {
+            send: (options: {
+              content?: string;
+              files: { attachment: string }[];
+              allowedMentions: { parse: never[] };
+            }) => Promise<unknown>;
+          };
+          await typedChannel.send({
+            ...(message ? { content: message } : {}),
+            files: [{ attachment: filePath }],
+            allowedMentions: { parse: [] },
+          });
+          const channelName = 'name' in channel ? channel.name : 'unknown';
+          console.log(`[xangi] Sent image to #${channelName}: ${filePath}`);
+          return {
+            handled: true,
+            response: `✅ #${channelName} に画像を送信しました`,
+          };
+        }
+      } catch (err) {
+        console.error(`[xangi] Failed to send image to channel: ${imgChannelId}`, err);
+        return { handled: true, response: `❌ 画像の送信に失敗しました` };
+      }
+    }
+
     // !discord channels
     if (text.match(/^!discord\s+channels$/)) {
       if (!sourceMessage) {
@@ -1280,12 +1318,21 @@ async function main() {
           console.log(`[scheduler] Created thread: ${thread.name} (${thread.id})`);
         }
 
+        // スレッド実行時、!discord send 内の親チャンネルIDをスレッドIDに書き換えるヘルパー
+        const redirectToThread = (text: string) => {
+          if (!threadId) return text;
+          return text.replace(new RegExp(`<#${channelId}>`, 'g'), `<#${threadId}>`);
+        };
+
         // プロンプト内の !discord send コマンドを先に直接実行
         // （AIに渡すとコマンドが応答に含まれず実行されないため）
         const promptCommands = extractDiscordSendFromPrompt(prompt);
         for (const cmd of promptCommands.commands) {
-          console.log(`[scheduler] Executing discord command from prompt: ${cmd.slice(0, 80)}...`);
-          await handleDiscordCommand(cmd, undefined, channelId);
+          const redirectedCmd = redirectToThread(cmd);
+          console.log(
+            `[scheduler] Executing discord command from prompt: ${redirectedCmd.slice(0, 80)}...`
+          );
+          await handleDiscordCommand(redirectedCmd, undefined, threadId || channelId);
         }
 
         // !discord send 以外のテキストが残っていればAIに渡す
@@ -1319,16 +1366,21 @@ async function main() {
             setSession(threadId, newSessionId);
           }
 
-          // AI応答内に !discord send でこのチャンネルへの送信があるか事前チェック
-          const hasSendToSameChannel = new RegExp(`^!discord\\s+send\\s+<#${channelId}>`, 'm').test(
-            result
-          );
+          // スレッド実行時はAI応答内のチャンネルIDも書き換え
+          const redirectedResult = redirectToThread(result);
 
-          // AI応答内の !discord コマンドを処理（sourceMessage なし、channelIdをフォールバック）
+          // AI応答内に !discord send でこのチャンネル（またはスレッド）への送信があるか事前チェック
+          const effectiveChannelId = threadId || channelId;
+          const hasSendToSameChannel = new RegExp(
+            `^!discord\\s+send\\s+<#${effectiveChannelId}>`,
+            'm'
+          ).test(redirectedResult);
+
+          // AI応答内の !discord コマンドを処理（sourceMessage なし、スレッドがあればスレッドIDをフォールバック）
           const feedbackResults = await handleDiscordCommandsInResponse(
-            result,
+            redirectedResult,
             undefined,
-            channelId
+            effectiveChannelId
           );
 
           // フィードバック結果があればエージェントに再注入
@@ -1348,8 +1400,12 @@ async function main() {
             } else if (threadId) {
               setSession(threadId, feedbackRun.sessionId);
             }
-            // 再注入後の応答にもコマンドがあれば処理
-            await handleDiscordCommandsInResponse(feedbackRun.result, undefined, channelId);
+            // 再注入後の応答にもコマンドがあれば処理（スレッドへリダイレクト）
+            await handleDiscordCommandsInResponse(
+              redirectToThread(feedbackRun.result),
+              undefined,
+              effectiveChannelId
+            );
           }
 
           // 結果を送信
