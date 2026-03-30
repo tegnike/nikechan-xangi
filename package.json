@@ -33,14 +33,13 @@
   "license": "MIT",
   "dependencies": {
     "@slack/bolt": "^4.6.0",
+    "croner": "^10.0.1",
     "discord.js": "^14.16.3",
-    "node-cron": "^4.2.1",
     "yaml": "^2.6.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
     "@types/node": "^22.10.5",
-    "@types/node-cron": "^3.0.11",
     "@typescript-eslint/eslint-plugin": "^8.19.0",
     "@typescript-eslint/parser": "^8.19.0",
     "eslint": "^9.17.0",

@@ -1,7 +1,7 @@
 import { readFileSync, mkdirSync, existsSync, watchFile, unwatchFile } from 'fs';
 import { readFile, writeFile, rename, access, unlink, mkdir } from 'fs/promises';
 import { dirname, join } from 'path';
-import cron from 'node-cron';
+import { Cron } from 'croner';
 /** スケジュール一覧の項目間区切り（splitMessage用） */
 export const SCHEDULE_SEPARATOR = '{{SPLIT}}';
 
@@ -52,7 +52,7 @@ export interface AgentRunFn {
 // ─── Scheduler ───────────────────────────────────────────────────────
 export class Scheduler {
   private schedules: Schedule[] = [];
-  private cronJobs = new Map<string, cron.ScheduledTask>();
+  private cronJobs = new Map<string, Cron>();
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
   private heartbeatRunning = new Map<string, boolean>();
@@ -123,7 +123,15 @@ export class Scheduler {
   add(schedule: Omit<Schedule, 'id' | 'createdAt' | 'enabled'>): Schedule {
     // Validate
     if (schedule.type === 'cron') {
-      if (!schedule.expression || !cron.validate(schedule.expression)) {
+      if (!schedule.expression) {
+        throw new Error(
+          `Invalid cron expression: ${schedule.expression}\n` +
+            '例: "0 9 * * *"（毎日9時）, "*/30 * * * *"（30分毎）'
+        );
+      }
+      try {
+        new Cron(schedule.expression);
+      } catch {
         throw new Error(
           `Invalid cron expression: ${schedule.expression}\n` +
             '例: "0 9 * * *"（毎日9時）, "*/30 * * * *"（30分毎）'
@@ -327,14 +335,10 @@ export class Scheduler {
     // 既に動いていたら止める
     this.stopJob(schedule.id);
     if (schedule.type === 'cron' && schedule.expression) {
-      const task = cron.schedule(
-        schedule.expression,
-        () => {
-          this.executeJob(schedule);
-        },
-        { timezone: this.timezone }
-      );
-      this.cronJobs.set(schedule.id, task);
+      const job = new Cron(schedule.expression, { timezone: this.timezone }, () => {
+        this.executeJob(schedule);
+      });
+      this.cronJobs.set(schedule.id, job);
       this.log(
         `[scheduler] Cron job started: ${schedule.id} (${schedule.expression}) → ${schedule.channelId}`
       );
