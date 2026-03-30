@@ -1,5 +1,5 @@
 import { readFileSync, mkdirSync, existsSync, watchFile, unwatchFile } from 'fs';
-import { readFile, writeFile, rename, access, unlink, mkdir } from 'fs/promises';
+import { readFile, writeFile, rename, access, unlink, mkdir, appendFile } from 'fs/promises';
 import { dirname, join } from 'path';
 import { Cron } from 'croner';
 /** スケジュール一覧の項目間区切り（splitMessage用） */
@@ -448,6 +448,7 @@ export class Scheduler {
       }
       return;
     }
+    const startTime = Date.now();
     try {
       this.log(`[scheduler] Running agent for: ${schedule.id}`);
       const result = await agentRunner(schedule.message, schedule.channelId, {
@@ -457,9 +458,33 @@ export class Scheduler {
         scheduleLabel: schedule.label,
       });
       this.log(`[scheduler] Agent completed: ${schedule.id} (${result.length} chars)`);
+      this.writeJobLog(schedule.id, 'completed', Date.now() - startTime, result.length);
     } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
       console.error(`[scheduler] Failed to execute ${schedule.id}:`, error);
+      this.writeJobLog(schedule.id, 'error', Date.now() - startTime, 0, errMsg);
     }
+  }
+  private writeJobLog(
+    scheduleId: string,
+    status: string,
+    durationMs: number,
+    resultChars: number,
+    error?: string
+  ): void {
+    const entry: Record<string, unknown> = {
+      ts: new Date().toISOString(),
+      id: scheduleId,
+      status,
+      duration_ms: durationMs,
+      result_chars: resultChars,
+    };
+    if (error) entry.error = error;
+    const logPath = join(dirname(this.filePath), 'logs', 'scheduler.jsonl');
+    const logDir = dirname(logPath);
+    mkdir(logDir, { recursive: true })
+      .then(() => appendFile(logPath, JSON.stringify(entry) + '\n'))
+      .catch((err) => console.error('[scheduler] Failed to write job log:', err));
   }
   // ─── Persistence ──────────────────────────────────────────────────
   /** 同期読み込み（コンストラクタ用） */
