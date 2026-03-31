@@ -54,6 +54,8 @@ RUN uv python install 3.12 && \
 # Install Claude Code CLI as node user
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
+# Install opencode CLI as node user
+RUN curl -fsSL https://opencode.ai/install | bash
 # Create system-wide python3 symlink so it is accessible from any PATH
 USER root
 RUN ln -s /home/node/.local/bin/python3 /usr/local/bin/python3 && \
