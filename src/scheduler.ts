@@ -449,14 +449,28 @@ export class Scheduler {
       return;
     }
     const startTime = Date.now();
-    try {
-      this.log(`[scheduler] Running agent for: ${schedule.id}`);
-      const result = await agentRunner(schedule.message, schedule.channelId, {
+    const runAgent = () =>
+      agentRunner(schedule.message, schedule.channelId, {
         isolated: schedule.isolated,
         thread: schedule.thread,
         scheduleId: schedule.id,
         scheduleLabel: schedule.label,
       });
+    try {
+      this.log(`[scheduler] Running agent for: ${schedule.id}`);
+      let result: string;
+      try {
+        result = await runAgent();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('shutting down')) {
+          this.log(`[scheduler] Runner was shutting down for ${schedule.id}, retrying...`);
+          await new Promise((r) => setTimeout(r, 2000));
+          result = await runAgent();
+        } else {
+          throw err;
+        }
+      }
       this.log(`[scheduler] Agent completed: ${schedule.id} (${result.length} chars)`);
       this.writeJobLog(schedule.id, 'completed', Date.now() - startTime, result.length);
     } catch (error) {
