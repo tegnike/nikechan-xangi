@@ -434,12 +434,18 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     this.currentItem = this.queue.shift()!;
     this.fullText = '';
 
+    // session_idが取得済みならプロンプトに注入（episode-recorder等で使用）
+    let prompt = this.currentItem.prompt;
+    if (this.sessionId) {
+      prompt = `SessionStart:session_id=${this.sessionId}\n\n${prompt}`;
+    }
+
     // セッション継続のためのオプションを追加
     const message = {
       type: 'user',
       message: {
         role: 'user',
-        content: this.currentItem.prompt,
+        content: prompt,
       },
     };
 
