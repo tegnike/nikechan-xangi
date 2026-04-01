@@ -5,6 +5,7 @@ import type { RunOptions, RunResult, StreamCallbacks, AgentRunner } from './agen
 import { mergeTexts } from './agent-runner.js';
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
 import { buildPersistentSystemPrompt } from './base-runner.js';
+import { notifyError } from './error-notify.js';
 
 /**
  * リクエストキューのアイテム
@@ -214,6 +215,10 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
       } else if (this.crashCount >= PersistentRunner.MAX_CRASHES) {
         // サーキットブレーカーオープン: キューを全部エラーにする
         console.error('[persistent-runner] Circuit breaker OPEN. Rejecting all queued requests.');
+        notifyError('サーキットブレーカー発動', `${this.crashCount}回連続クラッシュ`, {
+          破棄キュー数: this.queue.length,
+          終了コード: code ?? 'null',
+        });
         for (const item of this.queue) {
           item.reject(new Error('Circuit breaker open: too many process crashes'));
         }
@@ -223,6 +228,9 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
 
     this.process.on('error', (err) => {
       console.error('[persistent-runner] Process error:', err);
+      notifyError('プロセスエラー', err.message, {
+        ソース: 'persistent-runner',
+      });
       this.process = null;
       this.processAlive = false;
 
@@ -372,6 +380,9 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
         console.warn(
           `[persistent-runner] Request timed out after ${this.timeoutMs}ms. Killing process.`
         );
+        notifyError('リクエストタイムアウト', `${this.timeoutMs}ms超過でプロセスをkill`, {
+          ソース: 'persistent-runner',
+        });
         const error = new Error(`Request timed out after ${this.timeoutMs}ms`);
         this.currentItem.callbacks?.onError?.(error);
         this.currentItem.reject(error);

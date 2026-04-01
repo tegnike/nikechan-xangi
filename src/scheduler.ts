@@ -2,6 +2,7 @@ import { readFileSync, mkdirSync, existsSync, watchFile, unwatchFile } from 'fs'
 import { readFile, writeFile, rename, access, unlink, mkdir, appendFile } from 'fs/promises';
 import { dirname, join } from 'path';
 import { Cron } from 'croner';
+import { notifyError, formatDuration } from './error-notify.js';
 /** スケジュール一覧の項目間区切り（splitMessage用） */
 export const SCHEDULE_SEPARATOR = '{{SPLIT}}';
 
@@ -477,6 +478,11 @@ export class Scheduler {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error(`[scheduler] Failed to execute ${schedule.id}:`, error);
       this.writeJobLog(schedule.id, 'error', Date.now() - startTime, 0, errMsg);
+      const label = schedule.label || schedule.id;
+      notifyError('スケジューラーエラー', errMsg, {
+        ジョブ: `${label} (\`${schedule.id}\`)`,
+        実行時間: formatDuration(Date.now() - startTime),
+      });
     }
   }
   private writeJobLog(

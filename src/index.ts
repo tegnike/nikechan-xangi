@@ -33,6 +33,7 @@ import {
 } from './scheduler.js';
 import { initSessions, getSession, setSession, deleteSession } from './sessions.js';
 import { join } from 'path';
+import { initErrorNotify, notifyError } from './error-notify.js';
 
 /** メッセージを指定文字数で分割（カスタムセパレータ対応、デフォルトは行単位） */
 function splitMessage(text: string, maxLength: number, separator: string = '\n'): string[] {
@@ -1081,6 +1082,7 @@ async function main() {
   // Discord APIエラーでプロセスが落ちないようにハンドリング
   client.on('error', (error) => {
     console.error('[xangi] Discord client error:', error.message);
+    notifyError('Discord clientエラー', error.message);
   });
 
   // チャンネル単位のPromiseキュー（メッセージを順次処理）
@@ -1211,13 +1213,10 @@ async function main() {
         );
 
         // AIの応答から !discord コマンドを検知して実行
+        // 注: skipChannelIdは渡さない。ストリーミングはコマンドを表示から除去するだけで送信しないため、
+        // 同チャンネル宛のコマンドもここで実行する必要がある
         if (result) {
-          const feedbackResults = await handleDiscordCommandsInResponse(
-            result,
-            message,
-            undefined,
-            channelId
-          );
+          const feedbackResults = await handleDiscordCommandsInResponse(result, message);
 
           // フィードバック結果があればエージェントに再注入（新しいreplyは作らない）
           if (feedbackResults.length > 0) {
@@ -1266,6 +1265,9 @@ async function main() {
         }
       } catch (err) {
         console.error(`[xangi] Error processing queued message in ${channelId}:`, err);
+        notifyError('メッセージ処理エラー', err instanceof Error ? err.message : String(err), {
+          チャンネル: channelId,
+        });
       }
     });
     channelQueues.set(channelId, task);
@@ -1276,13 +1278,19 @@ async function main() {
     await client.login(config.discord.token);
     console.log('[xangi] Discord bot started');
 
-    // スケジューラにDiscord送信関数を登録
-    scheduler.registerSender('discord', async (channelId, msg) => {
+    // Discord送信関数を定義
+    const discordSend = async (channelId: string, msg: string) => {
       const channel = await client.channels.fetch(channelId);
       if (channel && 'send' in channel) {
         await (channel as { send: (content: string) => Promise<unknown> }).send(msg);
       }
-    });
+    };
+
+    // スケジューラにDiscord送信関数を登録
+    scheduler.registerSender('discord', discordSend);
+
+    // エラー通知を初期化
+    initErrorNotify(discordSend);
 
     // スケジューラにエージェント実行関数を登録
     scheduler.registerAgentRunner(
@@ -1973,7 +1981,11 @@ async function processPrompt(
       }
     } else if (sentLength === 0) {
       // テキストが空でも途中送信もなかった場合
-      await message.reply('✅');
+      // ただし !discord send コマンドが含まれている場合は後段で処理されるため✅を送らない
+      const hasDiscordCommands = /^!discord\s+send\s+/m.test(result);
+      if (!hasDiscordCommands) {
+        await message.reply('✅');
+      }
     }
 
     // AIの応答から SYSTEM_COMMAND: を検知して実行
