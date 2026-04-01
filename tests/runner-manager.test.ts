@@ -40,6 +40,10 @@ vi.mock('../src/persistent-runner.js', () => {
     getQueueLength() {
       return 0;
     }
+
+    getLastInputTokens() {
+      return 0;
+    }
   }
 
   return { PersistentRunner: MockPersistentRunner };

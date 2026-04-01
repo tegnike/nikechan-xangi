@@ -198,10 +198,25 @@ describe('PersistentRunner', () => {
     const promise = runner.runStream('test prompt', { onError });
 
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const mockProcess = getMockProcess();
+    const mockProcess1 = getMockProcess();
 
-    // エラーレスポンス
-    mockProcess.stdout.emit(
+    // 1回目のis_error → セッションリカバリが発動し、プロセスをkill→再spawn→リトライ
+    mockProcess1.stdout.emit(
+      'data',
+      JSON.stringify({
+        type: 'result',
+        result: 'Something went wrong',
+        session_id: 'test-session-123',
+        is_error: true,
+      }) + '\n'
+    );
+
+    // リカバリで新プロセスがspawnされるのを待つ
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const mockProcess2 = getMockProcess();
+
+    // 2回目のis_error → 同じセッションIDは既にfailedリストにあるのでrejectされる
+    mockProcess2.stdout.emit(
       'data',
       JSON.stringify({
         type: 'result',

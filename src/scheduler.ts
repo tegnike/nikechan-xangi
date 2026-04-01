@@ -294,9 +294,10 @@ export class Scheduler {
     });
   }
   private stopWatching(): void {
-    if (!this.watching) return;
-    unwatchFile(this.filePath);
-    this.watching = false;
+    if (this.watching) {
+      unwatchFile(this.filePath);
+      this.watching = false;
+    }
     if (this.heartbeatMdWatching) {
       const heartbeatMdPath = join(dirname(this.filePath), 'heartbeat.md');
       unwatchFile(heartbeatMdPath);

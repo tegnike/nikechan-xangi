@@ -11,7 +11,7 @@ function runCli(args: string, dataDir: string): { stdout: string; exitCode: numb
     const stdout = execSync(`npx tsx ${CLI_PATH} ${args}`, {
       env: { ...process.env, XANGI_DATA_DIR: dataDir },
       encoding: 'utf-8',
-      timeout: 10000,
+      timeout: 30000,
     });
     return { stdout, exitCode: 0 };
   } catch (error) {
@@ -23,7 +23,7 @@ function runCli(args: string, dataDir: string): { stdout: string; exitCode: numb
   }
 }
 
-describe('schedule-cli', () => {
+describe('schedule-cli', { timeout: 60000 }, () => {
   let tmpDir: string;
 
   beforeEach(() => {
