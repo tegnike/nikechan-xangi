@@ -62,13 +62,18 @@ export class RunnerManager implements AgentRunner {
   private getOrCreateRunner(channelId: string): PersistentRunner {
     const entry = this.pool.get(channelId);
     if (entry) {
-      entry.lastUsed = Date.now();
+      this.touch(channelId);
       return entry.runner;
     }
 
     // 上限チェック → LRU eviction
     if (this.pool.size >= this.maxProcesses) {
-      this.evictLRU();
+      const evicted = this.evictLRU();
+      if (!evicted) {
+        console.warn(
+          `[runner-manager] Pool is full (${this.pool.size}/${this.maxProcesses}) but all runners are busy; allowing temporary overflow`
+        );
+      }
     }
 
     // 新しい PersistentRunner を作成
@@ -86,13 +91,26 @@ export class RunnerManager implements AgentRunner {
   }
 
   /**
+   * 指定チャンネルの最終利用時刻を更新
+   */
+  private touch(channelId: string): void {
+    const entry = this.pool.get(channelId);
+    if (entry) {
+      entry.lastUsed = Date.now();
+    }
+  }
+
+  /**
    * 最も古い（LRU）ランナーを evict する
    */
-  private evictLRU(): void {
+  private evictLRU(): boolean {
     let oldestChannel: string | null = null;
     let oldestTime = Infinity;
 
     for (const [channelId, entry] of this.pool.entries()) {
+      if (entry.runner.isBusy()) {
+        continue;
+      }
       if (entry.lastUsed < oldestTime) {
         oldestTime = entry.lastUsed;
         oldestChannel = channelId;
@@ -106,7 +124,10 @@ export class RunnerManager implements AgentRunner {
       );
       entry.runner.shutdown();
       this.pool.delete(oldestChannel);
+      return true;
     }
+
+    return false;
   }
 
   /**
@@ -118,6 +139,9 @@ export class RunnerManager implements AgentRunner {
     const toAutoCompact: string[] = [];
 
     for (const [channelId, entry] of this.pool.entries()) {
+      if (entry.runner.isBusy()) {
+        continue;
+      }
       const idleMs = now - entry.lastUsed;
 
       if (idleMs > this.idleTimeoutMs) {
@@ -171,7 +195,11 @@ export class RunnerManager implements AgentRunner {
     if (options?.sessionId) {
       runner.setSessionId(options.sessionId);
     }
-    return runner.run(prompt, options);
+    try {
+      return await runner.run(prompt, options);
+    } finally {
+      this.touch(channelId);
+    }
   }
 
   /**
@@ -188,7 +216,11 @@ export class RunnerManager implements AgentRunner {
     if (options?.sessionId) {
       runner.setSessionId(options.sessionId);
     }
-    return runner.runStream(prompt, callbacks, options);
+    try {
+      return await runner.runStream(prompt, callbacks, options);
+    } finally {
+      this.touch(channelId);
+    }
   }
 
   /**

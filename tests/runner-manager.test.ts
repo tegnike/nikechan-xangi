@@ -6,24 +6,41 @@ vi.mock('../src/persistent-runner.js', () => {
   class MockPersistentRunner {
     private alive = true;
     private currentPrompt: string | null = null;
+    private busy = false;
 
     constructor() {}
 
     async run(prompt: string) {
       this.currentPrompt = prompt;
+      this.busy = true;
+      if (prompt === 'slow') {
+        return new Promise<{ result: string; sessionId: string }>((resolve) => {
+          setTimeout(() => {
+            this.busy = false;
+            this.currentPrompt = null;
+            resolve({ result: `response for: ${prompt}`, sessionId: 'session-123' });
+          }, 60 * 60 * 1000);
+        });
+      }
+      this.busy = false;
+      this.currentPrompt = null;
       return { result: `response for: ${prompt}`, sessionId: 'session-123' };
     }
 
     async runStream(prompt: string, callbacks: { onText?: Function; onComplete?: Function }) {
       this.currentPrompt = prompt;
+      this.busy = true;
       const result = { result: `stream response for: ${prompt}`, sessionId: 'session-123' };
       callbacks.onComplete?.(result);
+      this.busy = false;
+      this.currentPrompt = null;
       return result;
     }
 
     cancel() {
       if (this.currentPrompt) {
         this.currentPrompt = null;
+        this.busy = false;
         return true;
       }
       return false;
@@ -31,6 +48,10 @@ vi.mock('../src/persistent-runner.js', () => {
 
     shutdown() {
       this.alive = false;
+    }
+
+    isBusy() {
+      return this.busy;
     }
 
     isAlive() {
@@ -141,6 +162,45 @@ describe('RunnerManager', () => {
     // クリーンアップ間隔（5分）のタイマーが発火
     vi.advanceTimersByTime(5 * 60 * 1000);
 
+    expect(manager.getStatus().poolSize).toBe(0);
+  });
+
+  it('should not cleanup a runner while a long request is still running', async () => {
+    const idleTimeoutMs = 10 * 60 * 1000; // 10分
+    manager = new RunnerManager({ workdir: '/test' }, { maxProcesses: 5, idleTimeoutMs });
+
+    const runPromise = manager.run('slow', { channelId: 'ch1' });
+
+    await vi.advanceTimersByTimeAsync(idleTimeoutMs + 5 * 60 * 1000 + 1000);
+
+    const statusWhileRunning = manager.getStatus();
+    expect(statusWhileRunning.poolSize).toBe(1);
+    expect(statusWhileRunning.channels[0].channelId).toBe('ch1');
+
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    await expect(runPromise).resolves.toEqual({
+      result: 'response for: slow',
+      sessionId: 'session-123',
+    });
+  });
+
+  it('should refresh lastUsed after a long request completes', async () => {
+    const idleTimeoutMs = 10 * 60 * 1000; // 10分
+    manager = new RunnerManager({ workdir: '/test' }, { maxProcesses: 5, idleTimeoutMs });
+
+    const runPromise = manager.run('slow', { channelId: 'ch1' });
+
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    await expect(runPromise).resolves.toEqual({
+      result: 'response for: slow',
+      sessionId: 'session-123',
+    });
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(manager.getStatus().poolSize).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(idleTimeoutMs + 1000);
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
     expect(manager.getStatus().poolSize).toBe(0);
   });
 

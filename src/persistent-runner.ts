@@ -588,6 +588,13 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
   }
 
   /**
+   * 実行中または初期化待ちのリクエストがあるか
+   */
+  isBusy(): boolean {
+    return this.currentItem !== null || this.queue.length > 0 || this.waitingForInitialResult;
+  }
+
+  /**
    * プロセスが生きているか
    */
   isAlive(): boolean {
