@@ -18,6 +18,8 @@ x-common: &common
     - /workspace/.claude/skills/l-openclaw
     - /workspace/.claude/skills/l-tech-news-curation
     - /workspace/.claude/skills/l-workspace-rag
+    - /workspace/.claude/skills/l-xangi-restart
+    - /workspace/.claude/skills/l-xangi-settings
     # Git設定
     - ~/.gitconfig:/home/node/.gitconfig:ro
   environment: &common-env

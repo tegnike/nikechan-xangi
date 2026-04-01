@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y \
     git \
     ca-certificates \
     jq \
+    ffmpeg \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
@@ -37,8 +38,8 @@ RUN npm ci --omit=dev --ignore-scripts
 # Copy built files from builder stage
 COPY --from=builder /app/dist ./dist
 
-# Install Codex CLI globally (as root)
-RUN npm install -g @openai/codex
+# Install Codex CLI and tsx globally (as root)
+RUN npm install -g @openai/codex tsx
 
 # Create directories for node user
 RUN mkdir -p /home/node/.config/gh && chown -R node:node /home/node/.config
@@ -50,6 +51,9 @@ USER node
 RUN uv python install 3.12 && \
     ln -s $(uv python find 3.12) /home/node/.local/bin/python3 && \
     ln -s $(uv python find 3.12) /home/node/.local/bin/python
+
+# Install yt-dlp via uv
+RUN uv tool install yt-dlp
 
 # Install Claude Code CLI as node user
 RUN curl -fsSL https://claude.ai/install.sh | bash
@@ -64,6 +68,8 @@ USER node
 # Add Claude, Codex, and uv to PATH
 ENV PATH="/home/node/.local/bin:${PATH}"
 
+# Copy entrypoint script
+COPY --chown=node:node docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-# Default command
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "dist/index.js"]
