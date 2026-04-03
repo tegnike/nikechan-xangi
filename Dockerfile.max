@@ -65,8 +65,8 @@ USER root
 RUN ln -s /home/node/.local/bin/python3 /usr/local/bin/python3 && \
     ln -s /home/node/.local/bin/python /usr/local/bin/python
 USER node
-# Add Claude, Codex, and uv to PATH
-ENV PATH="/home/node/.local/bin:${PATH}"
+# Add Claude, Codex, opencode, and uv to PATH
+ENV PATH="/home/node/.opencode/bin:/home/node/.local/bin:${PATH}"
 
 # Copy entrypoint script
 COPY --chown=node:node docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
