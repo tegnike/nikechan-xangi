@@ -23,7 +23,13 @@ export async function handleDiscordCommand(
   if (sendMatch) {
     const [, channelId, content] = sendMatch;
     try {
-      const channel = await client.channels.fetch(channelId);
+      let channel = await client.channels.fetch(channelId).catch(() => null);
+      if (!channel && fallbackChannelId && channelId !== fallbackChannelId) {
+        console.warn(
+          `[xangi] Channel ${channelId} not found, falling back to ${fallbackChannelId}`
+        );
+        channel = await client.channels.fetch(fallbackChannelId);
+      }
       if (channel && 'send' in channel) {
         const typedChannel = channel as {
           send: (options: {
@@ -58,7 +64,13 @@ export async function handleDiscordCommand(
         console.error(`[xangi] File not found: ${filePath}`);
         return { handled: true, response: `❌ ファイルが見つかりません: ${filePath}` };
       }
-      const channel = await client.channels.fetch(imgChannelId);
+      let channel = await client.channels.fetch(imgChannelId).catch(() => null);
+      if (!channel && fallbackChannelId && imgChannelId !== fallbackChannelId) {
+        console.warn(
+          `[xangi] Channel ${imgChannelId} not found, falling back to ${fallbackChannelId}`
+        );
+        channel = await client.channels.fetch(fallbackChannelId);
+      }
       if (channel && 'send' in channel) {
         const typedChannel = channel as {
           send: (options: {
