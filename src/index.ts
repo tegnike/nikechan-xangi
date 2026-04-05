@@ -654,7 +654,8 @@ async function main() {
             redirectedCmd,
             config.timezone,
             undefined,
-            threadId || channelId
+            threadId || channelId,
+            { enforceChannelId: threadId || channelId }
           );
         }
 
@@ -701,7 +702,8 @@ async function main() {
             (trimmed) => {
               const fakeMessage = { channel } as Message;
               return executeScheduleFromResponse(trimmed, fakeMessage, scheduler, schedulerConfig);
-            }
+            },
+            effectiveChannelId
           );
 
           // フィードバック結果があればエージェントに再注入
@@ -725,6 +727,9 @@ async function main() {
               client,
               config.timezone,
               redirectToThread(feedbackRun.result),
+              undefined,
+              effectiveChannelId,
+              undefined,
               undefined,
               effectiveChannelId
             );

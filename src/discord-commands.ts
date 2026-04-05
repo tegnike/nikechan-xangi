@@ -16,12 +16,21 @@ export async function handleDiscordCommand(
   text: string,
   timezone: string,
   sourceMessage?: Message,
-  fallbackChannelId?: string
+  fallbackChannelId?: string,
+  options?: { enforceChannelId?: string }
 ): Promise<DiscordCommandResult> {
   // !discord send <#channelId> message (複数行対応)
   const sendMatch = text.match(/^!discord\s+send\s+<#(\d+)>\s+(.+)$/s);
   if (sendMatch) {
-    const [, channelId, content] = sendMatch;
+    let channelId = sendMatch[1];
+    // スケジュール実行時: 指定チャンネル以外への送信を強制リダイレクト
+    if (options?.enforceChannelId && channelId !== options.enforceChannelId) {
+      console.log(
+        `[xangi] Enforcing channelId for send: <#${channelId}> -> <#${options.enforceChannelId}>`
+      );
+      channelId = options.enforceChannelId;
+    }
+    const content = sendMatch[2];
     try {
       let channel = await client.channels.fetch(channelId).catch(() => null);
       if (!channel && fallbackChannelId && channelId !== fallbackChannelId) {
@@ -57,7 +66,16 @@ export async function handleDiscordCommand(
   // !discord send-image <#channelId> /path/to/image.png メッセージ（任意）
   const sendImageMatch = text.match(/^!discord\s+send-image\s+<#(\d+)>\s+(\/\S+)(?:\s+(.+))?$/s);
   if (sendImageMatch) {
-    const [, imgChannelId, filePath, message] = sendImageMatch;
+    let imgChannelId = sendImageMatch[1];
+    // スケジュール実行時: 指定チャンネル以外への送信を強制リダイレクト
+    if (options?.enforceChannelId && imgChannelId !== options.enforceChannelId) {
+      console.log(
+        `[xangi] Enforcing channelId for send-image: <#${imgChannelId}> -> <#${options.enforceChannelId}>`
+      );
+      imgChannelId = options.enforceChannelId;
+    }
+    const filePath = sendImageMatch[2];
+    const message = sendImageMatch[3];
     try {
       const { existsSync } = await import('node:fs');
       if (!existsSync(filePath)) {
@@ -315,7 +333,8 @@ export async function handleDiscordCommandsInResponse(
   sourceMessage?: Message,
   fallbackChannelId?: string,
   skipChannelId?: string,
-  onScheduleCommand?: (trimmed: string) => Promise<void>
+  onScheduleCommand?: (trimmed: string) => Promise<void>,
+  enforceChannelId?: string
 ): Promise<string[]> {
   const lines = text.split('\n');
   let inCodeBlock = false;
@@ -393,7 +412,8 @@ export async function handleDiscordCommandsInResponse(
             commandText,
             timezone,
             sourceMessage,
-            fallbackChannelId
+            fallbackChannelId,
+            enforceChannelId ? { enforceChannelId } : undefined
           );
           if (result.handled && result.response) {
             if (result.feedback) {
@@ -455,7 +475,7 @@ export async function handleDiscordCommandsInResponse(
       }
     }
 
-    // その他の !discord コマンド（channels, search, history）
+    // その他の !discord コマンド（channels, search, history, send-image）
     if (trimmed.startsWith('!discord ')) {
       console.log(`[xangi] Processing discord command from response: ${trimmed.slice(0, 50)}...`);
       const result = await handleDiscordCommand(
@@ -463,7 +483,8 @@ export async function handleDiscordCommandsInResponse(
         trimmed,
         timezone,
         sourceMessage,
-        fallbackChannelId
+        fallbackChannelId,
+        enforceChannelId ? { enforceChannelId } : undefined
       );
       if (result.handled && result.response) {
         if (result.feedback) {
