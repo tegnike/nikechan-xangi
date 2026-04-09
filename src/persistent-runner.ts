@@ -68,7 +68,7 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     this.workdir = options?.workdir;
     this.skipPermissions = options?.skipPermissions ?? false;
     this.sessionInitPrompt = options?.sessionInitPrompt;
-    this.systemPrompt = buildPersistentSystemPrompt();
+    this.systemPrompt = buildPersistentSystemPrompt(this.workdir);
   }
 
   /**

@@ -15,6 +15,28 @@ export interface BaseRunnerOptions {
   skipPermissions?: boolean;
 }
 
+function loadOptionalPrompt(
+  filePath: string,
+  label: string,
+  options?: { warnOnMissing?: boolean }
+): string {
+  if (!existsSync(filePath)) {
+    if (options?.warnOnMissing) {
+      console.warn(`[base-runner] ${label} not found at`, filePath);
+    }
+    return '';
+  }
+
+  try {
+    const content = readFileSync(filePath, 'utf-8');
+    console.log(`[base-runner] Loaded ${label} (${content.length} bytes)`);
+    return `\n\n## ${label}\n\n${content}`;
+  } catch (err) {
+    console.error(`[base-runner] Failed to load ${label}:`, err);
+    return '';
+  }
+}
+
 /**
  * チャットプラットフォーム連携用のシステムプロンプト（resumeあり）
  */
@@ -47,32 +69,31 @@ export function loadXangiCommands(): string {
   // dist/ から1つ上がプロジェクトルート
   const projectRoot = join(__dirname, '..');
   const filePath = join(projectRoot, 'prompts', 'XANGI_COMMANDS.md');
+  return loadOptionalPrompt(filePath, 'XANGI_COMMANDS.md', { warnOnMissing: true });
+}
 
-  if (!existsSync(filePath)) {
-    console.warn('[base-runner] XANGI_COMMANDS.md not found at', filePath);
+/**
+ * ワークスペース側の RTK 指示を読み込む
+ */
+export function loadRtkPrompt(workdir?: string): string {
+  if (!workdir) {
     return '';
   }
 
-  try {
-    const content = readFileSync(filePath, 'utf-8');
-    console.log(`[base-runner] Loaded XANGI_COMMANDS.md (${content.length} bytes)`);
-    return `\n\n## XANGI_COMMANDS.md\n\n${content}`;
-  } catch (err) {
-    console.error('[base-runner] Failed to load XANGI_COMMANDS.md:', err);
-    return '';
-  }
+  const filePath = join(workdir, 'RTK.md');
+  return loadOptionalPrompt(filePath, 'RTK.md');
 }
 
 /**
  * 完全なシステムプロンプトを生成（resume型ランナー用）
  */
-export function buildSystemPrompt(): string {
-  return CHAT_SYSTEM_PROMPT_RESUME + loadXangiCommands();
+export function buildSystemPrompt(workdir?: string): string {
+  return CHAT_SYSTEM_PROMPT_RESUME + loadXangiCommands() + loadRtkPrompt(workdir);
 }
 
 /**
  * 完全なシステムプロンプトを生成（常駐プロセス用）
  */
-export function buildPersistentSystemPrompt(): string {
-  return CHAT_SYSTEM_PROMPT_PERSISTENT + loadXangiCommands();
+export function buildPersistentSystemPrompt(workdir?: string): string {
+  return CHAT_SYSTEM_PROMPT_PERSISTENT + loadXangiCommands() + loadRtkPrompt(workdir);
 }

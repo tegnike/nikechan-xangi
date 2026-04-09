@@ -49,7 +49,7 @@ export class CodexRunner implements AgentRunner {
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.workdir = options?.workdir;
     this.skipPermissions = options?.skipPermissions ?? false;
-    this.systemPrompt = buildSystemPrompt();
+    this.systemPrompt = buildSystemPrompt(this.workdir);
   }
 
   /**

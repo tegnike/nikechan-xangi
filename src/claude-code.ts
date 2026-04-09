@@ -38,7 +38,7 @@ export class ClaudeCodeRunner {
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS; // デフォルト5分
     this.workdir = options?.workdir;
     this.skipPermissions = options?.skipPermissions ?? false;
-    this.systemPrompt = buildSystemPrompt();
+    this.systemPrompt = buildSystemPrompt(this.workdir);
   }
 
   async run(prompt: string, options?: RunOptions): Promise<RunResult> {
