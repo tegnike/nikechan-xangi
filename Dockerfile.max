@@ -64,19 +64,13 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 # Install opencode CLI as node user
 RUN curl -fsSL https://opencode.ai/install | bash
 
-# Install RTK from source to avoid glibc mismatch on arm64 containers
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal && \
-    . /home/node/.cargo/env && \
-    cargo install --locked --root /home/node/.local --git https://github.com/rtk-ai/rtk --tag v0.35.0 rtk
-
 # Create system-wide python3 symlink so it is accessible from any PATH
 USER root
 RUN ln -s /home/node/.local/bin/python3 /usr/local/bin/python3 && \
     ln -s /home/node/.local/bin/python /usr/local/bin/python
 USER node
-# Add Claude, Codex, opencode, uv, and cargo binaries to PATH
-ENV PATH="/home/node/.cargo/bin:/home/node/.opencode/bin:/home/node/.local/bin:${PATH}"
-ENV RTK_TELEMETRY_DISABLED=1
+# Add Claude, Codex, opencode, and uv binaries to PATH
+ENV PATH="/home/node/.opencode/bin:/home/node/.local/bin:${PATH}"
 
 # Copy entrypoint script
 COPY --chown=node:node docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

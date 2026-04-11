@@ -73,27 +73,15 @@ export function loadXangiCommands(): string {
 }
 
 /**
- * ワークスペース側の RTK 指示を読み込む
- */
-export function loadRtkPrompt(workdir?: string): string {
-  if (!workdir) {
-    return '';
-  }
-
-  const filePath = join(workdir, 'RTK.md');
-  return loadOptionalPrompt(filePath, 'RTK.md');
-}
-
-/**
  * 完全なシステムプロンプトを生成（resume型ランナー用）
  */
-export function buildSystemPrompt(workdir?: string): string {
-  return CHAT_SYSTEM_PROMPT_RESUME + loadXangiCommands() + loadRtkPrompt(workdir);
+export function buildSystemPrompt(_workdir?: string): string {
+  return CHAT_SYSTEM_PROMPT_RESUME + loadXangiCommands();
 }
 
 /**
  * 完全なシステムプロンプトを生成（常駐プロセス用）
  */
-export function buildPersistentSystemPrompt(workdir?: string): string {
-  return CHAT_SYSTEM_PROMPT_PERSISTENT + loadXangiCommands() + loadRtkPrompt(workdir);
+export function buildPersistentSystemPrompt(_workdir?: string): string {
+  return CHAT_SYSTEM_PROMPT_PERSISTENT + loadXangiCommands();
 }
