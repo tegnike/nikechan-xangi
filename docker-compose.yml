@@ -20,6 +20,8 @@ x-common: &common
     - /workspace/.claude/skills/l-workspace-rag
     - /workspace/.claude/skills/l-xangi-restart
     - /workspace/.claude/skills/l-xangi-settings
+    # opencode 設定（Alibaba/Qwen プロバイダー定義）
+    - ${WORKSPACE_PATH:-..}/opencode.json:/workspace/opencode.json:ro
     # Git設定
     - ~/.gitconfig:/home/node/.gitconfig:ro
   environment: &common-env
@@ -32,6 +34,8 @@ x-common: &common
     # Agent
     - AGENT_BACKEND=${AGENT_BACKEND:-claude-code}
     - AGENT_MODEL=${AGENT_MODEL:-}
+    # Alibaba/Qwen (opencode バックエンド用)
+    - ALIBABA_API_KEY=${ALIBABA_API_KEY:-}
     # Scheduler data directory (for schedules.json)
     - DATA_DIR=/workspace/.xangi
 
