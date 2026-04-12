@@ -36,6 +36,10 @@ x-common: &common
     - AGENT_MODEL=${AGENT_MODEL:-}
     # Alibaba/Qwen (opencode バックエンド用)
     - ALIBABA_API_KEY=${ALIBABA_API_KEY:-}
+    # Claude Code + DashScope (Anthropic互換エンドポイント)
+    - ANTHROPIC_BASE_URL=https://coding-intl.dashscope.aliyuncs.com/apps/anthropic
+    - ANTHROPIC_AUTH_TOKEN=${ALIBABA_API_KEY:-}
+    - ANTHROPIC_API_KEY=${ALIBABA_API_KEY:-}
     # Scheduler data directory (for schedules.json)
     - DATA_DIR=/workspace/.xangi
 
