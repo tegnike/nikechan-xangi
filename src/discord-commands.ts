@@ -457,7 +457,8 @@ export async function handleDiscordCommandsInResponse(
           commandText,
           timezone,
           sourceMessage,
-          fallbackChannelId
+          fallbackChannelId,
+          enforceChannelId ? { enforceChannelId } : undefined
         );
         if (result.handled && result.response) {
           if (result.feedback) {
