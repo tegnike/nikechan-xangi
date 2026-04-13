@@ -41,7 +41,7 @@ export class OpenCodeRunner implements AgentRunner {
   private currentProcess: ChildProcess | null = null;
 
   constructor(options?: BaseRunnerOptions) {
-    this.model = options?.model || 'alibaba/qwen3.5-plus';
+    this.model = options?.model || 'alibaba/qwen3.6-plus';
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.workdir = options?.workdir;
   }
