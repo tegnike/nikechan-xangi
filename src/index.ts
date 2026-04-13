@@ -582,7 +582,7 @@ async function main() {
               const filePaths = extractFilePaths(feedbackResult);
               const displayText =
                 filePaths.length > 0 ? stripFilePaths(feedbackResult) : feedbackResult;
-              const cleanedDisplay = displayText.trim();
+              const cleanedDisplay = stripCommandsFromDisplay(displayText).trim();
               if (cleanedDisplay && 'send' in message.channel) {
                 const textChunks = splitMessage(cleanedDisplay, DISCORD_SAFE_LENGTH);
                 for (const chunk of textChunks) {
@@ -604,7 +604,11 @@ async function main() {
                 client,
                 config.timezone,
                 feedbackResult,
-                message
+                message,
+                undefined,
+                undefined,
+                undefined,
+                threadEnforceChannelId
               );
             }
           }
