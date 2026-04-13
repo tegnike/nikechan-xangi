@@ -1,5 +1,6 @@
 import {
   Client,
+  ChannelType,
   GatewayIntentBits,
   Events,
   REST,
@@ -542,6 +543,13 @@ async function main() {
           }
 
           const schedulerConfig = { ...config.scheduler, timezone: config.timezone };
+          // スレッドチャンネルの場合は !discord send を現在のスレッドに強制リダイレクト
+          // AIが誤ったチャンネルIDを指定しても、スレッド内に届くようにする
+          const isThread =
+            message.channel.type === ChannelType.PublicThread ||
+            message.channel.type === ChannelType.PrivateThread ||
+            message.channel.type === ChannelType.AnnouncementThread;
+          const threadEnforceChannelId = isThread ? channelId : undefined;
           const feedbackResults = await handleDiscordCommandsInResponse(
             client,
             config.timezone,
@@ -549,7 +557,8 @@ async function main() {
             message,
             undefined,
             undefined,
-            (trimmed) => executeScheduleFromResponse(trimmed, message, scheduler, schedulerConfig)
+            (trimmed) => executeScheduleFromResponse(trimmed, message, scheduler, schedulerConfig),
+            threadEnforceChannelId
           );
 
           // フィードバック結果があればエージェントに再注入
@@ -691,9 +700,16 @@ async function main() {
           ? `${channelId}_isolated_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
           : channelId;
 
+        // スケジューラ実行時にチャンネルコンテキストを注入する
+        // AIが !discord send でどのチャンネルIDを使うべきか知るために必要
+        const channelContext = threadId
+          ? `[実行チャンネル: <#${channelId}> / スレッド: <#${threadId}> — !discord send は <#${channelId}> 宛てに書くこと（スレッドへ自動リダイレクトされます）]`
+          : `[実行チャンネル: <#${channelId}> — !discord send は <#${channelId}> 宛てに書くこと]`;
+        const contextualPrompt = `${channelContext}\n${remainingPrompt}`;
+
         try {
           const sessionId = options?.isolated ? undefined : getSession(channelId);
-          const { result, sessionId: newSessionId } = await agentRunner.run(remainingPrompt, {
+          const { result, sessionId: newSessionId } = await agentRunner.run(contextualPrompt, {
             skipPermissions: config.agent.config.skipPermissions ?? false,
             sessionId,
             channelId: runnerChannelId,
@@ -708,10 +724,24 @@ async function main() {
           const redirectedResult = redirectToThread(result);
 
           const effectiveChannelId = threadId || channelId;
+
+          // コードブロック内の !discord send は実行されないため、チェック前に除去する
+          const stripCodeBlocksForCheck = (text: string): string => {
+            let stripped = '';
+            let inBlock = false;
+            for (const line of text.split('\n')) {
+              if (line.trim().startsWith('```')) {
+                inBlock = !inBlock;
+                continue;
+              }
+              if (!inBlock) stripped += line + '\n';
+            }
+            return stripped;
+          };
           const hasSendToSameChannel = new RegExp(
             `^!discord\\s+send\\s+<#${effectiveChannelId}>`,
             'm'
-          ).test(redirectedResult);
+          ).test(stripCodeBlocksForCheck(redirectedResult));
 
           const schedulerConfig = { ...config.scheduler, timezone: config.timezone };
           const feedbackResults = await handleDiscordCommandsInResponse(

@@ -41,6 +41,9 @@ RUN npm ci --omit=dev --ignore-scripts
 # Copy built files from builder stage
 COPY --from=builder /app/dist ./dist
 
+# Copy prompts directory (XANGI_COMMANDS.md等のシステムプロンプト)
+COPY prompts/ ./prompts/
+
 # Install Codex CLI and tsx globally (as root)
 RUN npm install -g @openai/codex tsx
 
@@ -60,6 +63,9 @@ RUN uv tool install yt-dlp
 
 # Install Claude Code CLI as node user
 RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# インタラクティブシェルのデフォルト作業ディレクトリを /workspace に設定
+RUN echo 'cd /workspace 2>/dev/null || true' >> /home/node/.bashrc
 
 # Install opencode CLI as node user
 RUN curl -fsSL https://opencode.ai/install | bash
