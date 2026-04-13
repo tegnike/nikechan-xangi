@@ -29,6 +29,8 @@ export interface Config {
     autoReplyChannels?: string[];
     streaming?: boolean;
     showThinking?: boolean;
+    /** チャンネルレポート転送設定: source channel ID -> report channel ID */
+    channelReports?: Record<string, string>;
   };
   slack: {
     enabled: boolean;
@@ -118,6 +120,15 @@ export function loadConfig(): Config {
           .filter(Boolean) || [],
       streaming: process.env.DISCORD_STREAMING !== 'false',
       showThinking: process.env.DISCORD_SHOW_THINKING !== 'false',
+      channelReports: process.env.CHANNEL_REPORTS
+        ? Object.fromEntries(
+            process.env.CHANNEL_REPORTS.split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+              .map((pair) => pair.split(':').map((s) => s.trim()))
+              .filter((parts) => parts.length === 2) as [string, string][]
+          )
+        : undefined,
     },
     slack: {
       enabled: !!slackBotToken && !!slackAppToken,
