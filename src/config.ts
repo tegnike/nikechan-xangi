@@ -65,8 +65,16 @@ export function loadConfig(): Config {
 
   const discordAllowedUser = process.env.DISCORD_ALLOWED_USER;
   const slackAllowedUser = process.env.SLACK_ALLOWED_USER;
-  const discordAllowedUsers = discordAllowedUser ? [discordAllowedUser] : [];
-  const slackAllowedUsers = slackAllowedUser ? [slackAllowedUser] : [];
+  // DISCORD_BOT_PASSTHROUGH: システムBot用の追加許可ID（カンマ区切り）。1ユーザー制限にはカウントしない
+  const discordBotPassthrough =
+    process.env.DISCORD_BOT_PASSTHROUGH?.split(',')
+      .map((s) => s.trim())
+      .filter(Boolean) || [];
+  const discordAllowedUsers = [
+    ...(discordAllowedUser ? [discordAllowedUser.trim()] : []),
+    ...discordBotPassthrough,
+  ];
+  const slackAllowedUsers = slackAllowedUser ? [slackAllowedUser.trim()] : [];
 
   const backend = (process.env.AGENT_BACKEND || 'claude-code') as AgentBackend;
   if (

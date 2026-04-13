@@ -62,7 +62,13 @@ async function main() {
     console.error('[xangi] Error: SLACK_ALLOWED_USER or ALLOWED_USER must be set for Slack');
     process.exit(1);
   }
-  if (discordAllowed.length > 1 || slackAllowed.length > 1) {
+  // DISCORD_BOT_PASSTHROUGH分を除いた人間ユーザー数のみチェック
+  const discordBotPassthrough =
+    process.env.DISCORD_BOT_PASSTHROUGH?.split(',')
+      .map((s) => s.trim())
+      .filter(Boolean) || [];
+  const discordHumanUsers = discordAllowed.filter((id) => !discordBotPassthrough.includes(id));
+  if (discordHumanUsers.length > 1 || slackAllowed.length > 1) {
     console.error('[xangi] Error: Only one user per platform is allowed');
     console.error('[xangi] 利用規約遵守のため、複数ユーザーの設定は禁止です');
     process.exit(1);
@@ -407,8 +413,6 @@ async function main() {
   const recentMessageIds = new Set<string>();
 
   client.on(Events.MessageCreate, async (message) => {
-    if (message.author.bot) return;
-
     if (recentMessageIds.has(message.id)) return;
     recentMessageIds.add(message.id);
     setTimeout(() => recentMessageIds.delete(message.id), 60000);
