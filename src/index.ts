@@ -25,6 +25,7 @@ import { DISCORD_SAFE_LENGTH } from './constants.js';
 import { Scheduler } from './scheduler.js';
 import { initSessions, getSession, setSession, deleteSession } from './sessions.js';
 import { join } from 'path';
+import { existsSync, readFileSync } from 'fs';
 import { initErrorNotify, notifyError } from './error-notify.js';
 
 // Extracted modules
@@ -107,11 +108,6 @@ async function main() {
   const dataDir = process.env.DATA_DIR || join(workdir, '.xangi');
   const scheduler = new Scheduler(dataDir, {
     timezone: config.timezone,
-    onSessionReset: (channelId) => {
-      deleteSession(channelId);
-      agentRunner.destroy?.(channelId);
-      console.log(`[xangi] Session reset after scheduled job: channel ${channelId}`);
-    },
   });
 
   // セッション永続化を初期化
@@ -521,6 +517,17 @@ async function main() {
     const prev = channelQueues.get(channelId) ?? Promise.resolve();
     const task = prev.then(async () => {
       try {
+        // チャンネルに紐づくスキルのSKILL.mdを前置注入
+        const channelSkillName = config.discord.channelSkills?.[channelId];
+        if (channelSkillName) {
+          const skill = skills.find((s) => s.name === channelSkillName);
+          if (skill && existsSync(skill.path)) {
+            const skillContent = readFileSync(skill.path, 'utf-8');
+            prompt = `以下のスキル定義に従って行動してください:\n\n${skillContent}\n\n---\n\n${prompt}`;
+            console.log(`[xangi] Injecting skill "${channelSkillName}" for channel ${channelId}`);
+          }
+        }
+
         const result = await processPrompt(
           message,
           agentRunner,
@@ -619,6 +626,12 @@ async function main() {
               );
             }
           }
+        }
+        // メッセージ処理完了後のセッションリセット
+        if (config.discord.resetAfterMessageChannels?.includes(channelId)) {
+          deleteSession(channelId);
+          agentRunner.destroy?.(channelId);
+          console.log(`[xangi] Session reset after message in channel ${channelId}`);
         }
       } catch (err) {
         console.error(`[xangi] Error processing queued message in ${channelId}:`, err);

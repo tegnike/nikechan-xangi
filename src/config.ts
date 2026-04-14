@@ -31,6 +31,10 @@ export interface Config {
     showThinking?: boolean;
     /** チャンネルレポート転送設定: source channel ID -> report channel ID */
     channelReports?: Record<string, string>;
+    /** メッセージ処理完了後にセッションをリセットするチャンネルID一覧 */
+    resetAfterMessageChannels?: string[];
+    /** チャンネルIDとスキル名のマッピング: メッセージ受信時にSKILL.mdをプロンプトに前置注入する */
+    channelSkills?: Record<string, string>;
   };
   slack: {
     enabled: boolean;
@@ -123,6 +127,19 @@ export function loadConfig(): Config {
       channelReports: process.env.CHANNEL_REPORTS
         ? Object.fromEntries(
             process.env.CHANNEL_REPORTS.split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+              .map((pair) => pair.split(':').map((s) => s.trim()))
+              .filter((parts) => parts.length === 2) as [string, string][]
+          )
+        : undefined,
+      resetAfterMessageChannels:
+        process.env.RESET_AFTER_MESSAGE_CHANNELS?.split(',')
+          .map((s) => s.trim())
+          .filter(Boolean) || [],
+      channelSkills: process.env.CHANNEL_SKILLS
+        ? Object.fromEntries(
+            process.env.CHANNEL_SKILLS.split(',')
               .map((s) => s.trim())
               .filter(Boolean)
               .map((pair) => pair.split(':').map((s) => s.trim()))
