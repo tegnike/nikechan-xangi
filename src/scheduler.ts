@@ -39,6 +39,8 @@ export interface Schedule {
     start: string; // "HH:MM" (inclusive)
     end: string; // "HH:MM" (exclusive)
   };
+  /** ジョブ完了後にそのチャンネルのセッションをリセットするか */
+  resetSessionAfter?: boolean;
 }
 export interface SendMessageFn {
   (channelId: string, message: string): Promise<void>;
@@ -69,9 +71,18 @@ export class Scheduler {
   private heartbeatMdCache: string | null = null;
   private heartbeatMdWatching = false;
   private pendingSave: Promise<void> = Promise.resolve();
-  constructor(dataDir?: string, options?: { quiet?: boolean; timezone?: string }) {
+  private onSessionReset?: (channelId: string, platform: Platform) => void;
+  constructor(
+    dataDir?: string,
+    options?: {
+      quiet?: boolean;
+      timezone?: string;
+      onSessionReset?: (channelId: string, platform: Platform) => void;
+    }
+  ) {
     this.quiet = options?.quiet ?? false;
     this.timezone = options?.timezone ?? 'Asia/Tokyo';
+    this.onSessionReset = options?.onSessionReset;
     const dir = dataDir || join(process.cwd(), '.xangi');
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
@@ -475,6 +486,10 @@ export class Scheduler {
       }
       this.log(`[scheduler] Agent completed: ${schedule.id} (${result.length} chars)`);
       this.writeJobLog(schedule.id, 'completed', Date.now() - startTime, result.length);
+      if (schedule.resetSessionAfter && this.onSessionReset) {
+        this.onSessionReset(schedule.channelId, schedule.platform);
+        this.log(`[scheduler] Session reset after job: ${schedule.id} → ${schedule.channelId}`);
+      }
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error(`[scheduler] Failed to execute ${schedule.id}:`, error);

@@ -105,7 +105,14 @@ async function main() {
 
   // スケジューラを初期化（ワークスペースの .xangi を使用）
   const dataDir = process.env.DATA_DIR || join(workdir, '.xangi');
-  const scheduler = new Scheduler(dataDir, { timezone: config.timezone });
+  const scheduler = new Scheduler(dataDir, {
+    timezone: config.timezone,
+    onSessionReset: (channelId) => {
+      deleteSession(channelId);
+      agentRunner.destroy?.(channelId);
+      console.log(`[xangi] Session reset after scheduled job: channel ${channelId}`);
+    },
+  });
 
   // セッション永続化を初期化
   initSessions(dataDir);
