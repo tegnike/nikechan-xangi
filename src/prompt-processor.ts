@@ -218,7 +218,8 @@ export async function processPrompt(
   prompt: string,
   skipPermissions: boolean,
   channelId: string,
-  config: ReturnType<typeof loadConfig>
+  config: ReturnType<typeof loadConfig>,
+  disallowedTools?: string[]
 ): Promise<string | null> {
   try {
     // チャンネル情報をプロンプトに付与
@@ -234,15 +235,23 @@ export async function processPrompt(
     const useStreaming = config.discord.streaming ?? true;
     const showThinking = config.discord.showThinking ?? true;
 
-    // !skip プレフィックスの場合、ワンショットランナーを使用
+    // !skip または disallowedTools がある場合、ワンショットランナーを使用
+    // （PersistentRunner はプロセス起動時にフラグを設定するため、リクエスト単位での変更不可）
     const defaultSkip = config.agent.config.skipPermissions ?? false;
     const needsSkipRunner = skipPermissions && !defaultSkip;
-    const runner: AgentRunner = needsSkipRunner
-      ? new ClaudeCodeRunner(config.agent.config)
-      : agentRunner;
+    const needsDisallowRunner = (disallowedTools?.length ?? 0) > 0;
+    const runner: AgentRunner =
+      needsSkipRunner || needsDisallowRunner
+        ? new ClaudeCodeRunner(config.agent.config)
+        : agentRunner;
 
     if (needsSkipRunner) {
       console.log(`[xangi] Using one-shot skip runner for channel ${channelId}`);
+    }
+    if (needsDisallowRunner) {
+      console.log(
+        `[xangi] Using one-shot disallow runner for channel ${channelId} (${disallowedTools?.join(', ')})`
+      );
     }
 
     // ベース絵文字（処理中ずっと表示、完了時に外す）
@@ -271,7 +280,7 @@ export async function processPrompt(
     let newSessionId: string;
     let sentLength = 0;
 
-    if (useStreaming && showThinking && !needsSkipRunner) {
+    if (useStreaming && showThinking && !needsSkipRunner && !needsDisallowRunner) {
       const PARTIAL_SEND_DELAY_MS = 5000;
       let partialTimer: ReturnType<typeof setTimeout> | null = null;
       let isFirstReply = true;
@@ -320,7 +329,7 @@ export async function processPrompt(
             }
           },
         },
-        { skipPermissions, sessionId, channelId }
+        { skipPermissions, sessionId, channelId, disallowedTools }
       );
       if (partialTimer) clearTimeout(partialTimer);
       if (pendingSend) await pendingSend;
@@ -328,7 +337,12 @@ export async function processPrompt(
       result = streamResult.result;
       newSessionId = streamResult.sessionId;
     } else {
-      const runResult = await runner.run(prompt, { skipPermissions, sessionId, channelId });
+      const runResult = await runner.run(prompt, {
+        skipPermissions,
+        sessionId,
+        channelId,
+        disallowedTools,
+      });
       result = runResult.result;
       newSessionId = runResult.sessionId;
     }

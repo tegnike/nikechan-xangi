@@ -528,13 +528,20 @@ async function main() {
           }
         }
 
+        // プロンプトまたはチャンネルスキルから denied-tools を取得
+        const promptSkillName = prompt.trim().match(/^\/([a-zA-Z0-9_-]+)/)?.[1];
+        const activeSkillName = promptSkillName ?? channelSkillName;
+        const activeSkill = activeSkillName ? skills.find((s) => s.name === activeSkillName) : null;
+        const disallowedTools = activeSkill?.deniedTools ?? [];
+
         const result = await processPrompt(
           message,
           agentRunner,
           prompt,
           skipPermissions,
           channelId,
-          config
+          config,
+          disallowedTools.length > 0 ? disallowedTools : undefined
         );
 
         if (result) {
@@ -731,12 +738,27 @@ async function main() {
           : `[実行チャンネル: <#${channelId}> — !discord send は <#${channelId}> 宛てに書くこと]`;
         const contextualPrompt = `${channelContext}\n${remainingPrompt}`;
 
+        // プロンプトからスキル名を特定し、denied-tools があればワンショットランナーを使用
+        const scheduleSkillName = remainingPrompt.trim().match(/^\/([a-zA-Z0-9_-]+)/)?.[1];
+        const scheduleSkill = scheduleSkillName
+          ? skills.find((s) => s.name === scheduleSkillName)
+          : null;
+        const scheduleDeniedTools = scheduleSkill?.deniedTools ?? [];
+        const scheduleRunner =
+          scheduleDeniedTools.length > 0 ? new ClaudeCodeRunner(config.agent.config) : agentRunner;
+        if (scheduleDeniedTools.length > 0) {
+          console.log(
+            `[scheduler] Using one-shot runner for skill "${scheduleSkillName}" (denied: ${scheduleDeniedTools.join(', ')})`
+          );
+        }
+
         try {
           const sessionId = options?.isolated ? undefined : getSession(channelId);
-          const { result, sessionId: newSessionId } = await agentRunner.run(contextualPrompt, {
+          const { result, sessionId: newSessionId } = await scheduleRunner.run(contextualPrompt, {
             skipPermissions: config.agent.config.skipPermissions ?? false,
             sessionId,
             channelId: runnerChannelId,
+            disallowedTools: scheduleDeniedTools.length > 0 ? scheduleDeniedTools : undefined,
           });
 
           if (!options?.isolated) {
@@ -771,10 +793,11 @@ async function main() {
               `[scheduler] Re-injecting ${feedbackResults.length} feedback result(s) to agent`
             );
             const feedbackSession = options?.isolated ? newSessionId : getSession(channelId);
-            const feedbackRun = await agentRunner.run(feedbackPrompt, {
+            const feedbackRun = await scheduleRunner.run(feedbackPrompt, {
               skipPermissions: config.agent.config.skipPermissions ?? false,
               sessionId: feedbackSession,
               channelId: runnerChannelId,
+              disallowedTools: scheduleDeniedTools.length > 0 ? scheduleDeniedTools : undefined,
             });
             if (!options?.isolated) {
               setSession(channelId, feedbackRun.sessionId);

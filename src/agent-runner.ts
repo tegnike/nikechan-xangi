@@ -9,6 +9,7 @@ export interface RunOptions {
   skipPermissions?: boolean;
   sessionId?: string;
   channelId?: string; // プロセス管理用
+  disallowedTools?: string[]; // 使用禁止ツールリスト（SKILL.mdの denied-tools から注入）
 }
 
 export interface RunResult {

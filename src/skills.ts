@@ -6,6 +6,7 @@ export interface Skill {
   name: string;
   description: string;
   path: string;
+  deniedTools: string[];
 }
 
 /**
@@ -88,9 +89,9 @@ function parseSkillFile(filePath: string, defaultName: string): Skill | null {
     const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
     let description = '';
     let name = defaultName;
+    const frontmatter = frontmatterMatch?.[1] ?? '';
 
     if (frontmatterMatch) {
-      const frontmatter = frontmatterMatch[1];
       const descMatch = frontmatter.match(/description:\s*["']?([^"'\n]+)["']?/);
       const nameMatch = frontmatter.match(/name:\s*["']?([^"'\n]+)["']?/);
 
@@ -112,10 +113,24 @@ function parseSkillFile(filePath: string, defaultName: string): Skill | null {
       }
     }
 
+    // denied-tools パース（YAML リスト形式: `- tool` の複数行）
+    const deniedTools: string[] = [];
+    const deniedBlockMatch = frontmatter.match(/denied-tools:\s*\n((?:[ \t]*-[ \t]+.+\n?)*)/);
+    if (deniedBlockMatch) {
+      const items = deniedBlockMatch[1].match(/^[ \t]*-[ \t]+(.+)$/gm);
+      if (items) {
+        for (const item of items) {
+          const tool = item.replace(/^[ \t]*-[ \t]+/, '').trim();
+          if (tool) deniedTools.push(tool);
+        }
+      }
+    }
+
     return {
       name,
       description: description || '(説明なし)',
       path: filePath,
+      deniedTools,
     };
   } catch {
     return null;

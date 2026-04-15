@@ -58,6 +58,11 @@ export class ClaudeCodeRunner {
       args.push('--model', this.model);
     }
 
+    // 使用禁止ツール
+    if (options?.disallowedTools?.length) {
+      args.push('--disallowedTools', ...options.disallowedTools);
+    }
+
     // チャットプラットフォーム連携のシステムプロンプト + AGENTS.md
     args.push('--append-system-prompt', this.systemPrompt);
 
@@ -162,6 +167,11 @@ export class ClaudeCodeRunner {
 
     if (this.model) {
       args.push('--model', this.model);
+    }
+
+    // 使用禁止ツール
+    if (options?.disallowedTools?.length) {
+      args.push('--disallowedTools', ...options.disallowedTools);
     }
 
     // チャットプラットフォーム連携のシステムプロンプト + AGENTS.md
