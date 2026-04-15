@@ -41,6 +41,7 @@ import {
   processPrompt,
   extractDiscordSendFromPrompt,
   stripCommandsFromDisplay,
+  getDisplayChunks,
   handleSettingsFromResponse,
 } from './prompt-processor.js';
 import {
@@ -563,16 +564,20 @@ async function main() {
           // チャンネルレポート自動転送
           const reportChannelId = config.discord.channelReports?.[channelId];
           if (reportChannelId) {
-            const displayText = stripCommandsFromDisplay(stripFilePaths(result)).trim();
-            if (displayText && !displayText.includes('[SILENT]')) {
+            const displayChunks = getDisplayChunks(result);
+            if (displayChunks.length > 0) {
               const reportChannel = await client.channels.fetch(reportChannelId).catch(() => null);
               if (reportChannel && 'send' in reportChannel) {
-                const summary = displayText.slice(0, 300);
-                await (reportChannel as { send: (content: string) => Promise<unknown> }).send(
-                  `[カラクリワールド] ${summary}`
-                );
+                const send = (
+                  reportChannel as {
+                    send: (content: string) => Promise<unknown>;
+                  }
+                ).send.bind(reportChannel);
+                for (const chunk of displayChunks) {
+                  await send(chunk);
+                }
                 console.log(
-                  `[xangi] Auto-forwarded response to report channel #${reportChannelId}`
+                  `[xangi] Auto-forwarded ${displayChunks.length} chunk(s) to report channel #${reportChannelId}`
                 );
               }
             }

@@ -178,6 +178,16 @@ export function stripCommandsFromDisplay(text: string): string {
   return result.join('\n').trim();
 }
 
+export function getDisplayText(text: string): string {
+  const cleaned = stripCommandsFromDisplay(stripFilePaths(text)).trim();
+  return cleaned.includes('[SILENT]') ? '' : cleaned;
+}
+
+export function getDisplayChunks(text: string): string[] {
+  const cleaned = getDisplayText(text);
+  return cleaned ? splitMessage(cleaned, DISCORD_SAFE_LENGTH) : [];
+}
+
 /**
  * AIの応答から SYSTEM_COMMAND: を検知して実行
  * 形式: SYSTEM_COMMAND:restart / SYSTEM_COMMAND:set key=value
