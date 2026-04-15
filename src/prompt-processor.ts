@@ -132,8 +132,8 @@ export function stripCommandsFromDisplay(text: string): string {
       continue;
     }
 
-    // !discord send の複数行対応: コマンド行と続く行を除去
-    const sendMatch = trimmed.match(/^!discord\s+send\s+<#\d+>\s*(.*)/);
+    // !discord send / send-here の複数行対応: コマンド行と続く行を除去
+    const sendMatch = trimmed.match(/^!discord\s+(?:send\s+<#\d+>|send-here)\s*(.*)/);
     if (sendMatch) {
       i++;
       let inBodyCodeBlock = false;

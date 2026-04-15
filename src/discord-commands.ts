@@ -19,6 +19,44 @@ export async function handleDiscordCommand(
   fallbackChannelId?: string,
   options?: { enforceChannelId?: string }
 ): Promise<DiscordCommandResult> {
+  // !discord send-here message (チャンネルID不要、実行チャンネルに自動送信)
+  const sendHereMatch = text.match(/^!discord\s+send-here\s+(.+)$/s);
+  if (sendHereMatch) {
+    const targetChannelId = options?.enforceChannelId ?? fallbackChannelId;
+    if (!targetChannelId) {
+      console.warn('[xangi] !discord send-here: no enforceChannelId or fallbackChannelId');
+      return { handled: true, response: '❌ 送信先チャンネルが特定できません' };
+    }
+    const content = sendHereMatch[1];
+    try {
+      const channel = await client.channels.fetch(targetChannelId).catch(() => null);
+      if (channel && 'send' in channel) {
+        const typedChannel = channel as {
+          send: (options: {
+            content: string;
+            allowedMentions: { parse: never[] };
+          }) => Promise<unknown>;
+        };
+        const chunks = chunkDiscordMessage(content, 2000);
+        for (const chunk of chunks) {
+          await typedChannel.send({
+            content: chunk,
+            allowedMentions: { parse: [] },
+          });
+        }
+        const channelName = 'name' in channel ? channel.name : 'unknown';
+        console.log(
+          `[xangi] Sent message (send-here) to #${channelName} (${chunks.length} chunk(s))`
+        );
+        return { handled: true, response: `✅ #${channelName} にメッセージを送信しました` };
+      }
+      return { handled: true, response: '❌ チャンネルが見つかりません' };
+    } catch (err) {
+      console.error(`[xangi] Failed to send-here to channel: ${targetChannelId}`, err);
+      return { handled: true, response: `❌ チャンネルへの送信に失敗しました` };
+    }
+  }
+
   // !discord send <#channelId> message (複数行対応)
   const sendMatch = text.match(/^!discord\s+send\s+<#(\d+)>\s+(.+)$/s);
   if (sendMatch) {
@@ -357,10 +395,11 @@ export async function handleDiscordCommandsInResponse(
 
     const trimmed = line.trim();
 
-    // !discord send の複数行対応
+    // !discord send / send-here の複数行対応
     const sendMatch = trimmed.match(/^!discord\s+send\s+<#(\d+)>\s*(.*)/);
-    if (sendMatch) {
-      if (skipChannelId && sendMatch[1] === skipChannelId) {
+    const sendHereMultiMatch = sendMatch ? null : trimmed.match(/^!discord\s+send-here\s*(.*)/);
+    if (sendMatch || sendHereMultiMatch) {
+      if (sendMatch && skipChannelId && sendMatch[1] === skipChannelId) {
         console.log(
           `[xangi] Skipping !discord send to same channel <#${skipChannelId}> (already sent via streaming)`
         );
@@ -381,7 +420,7 @@ export async function handleDiscordCommandsInResponse(
         }
         continue;
       }
-      const firstLineContent = sendMatch[2] ?? '';
+      const firstLineContent = sendMatch ? (sendMatch[2] ?? '') : (sendHereMultiMatch![1] ?? '');
 
       if (firstLineContent.trim() === '') {
         const bodyLines: string[] = [];
@@ -403,7 +442,9 @@ export async function handleDiscordCommandsInResponse(
         }
         const fullMessage = bodyLines.join('\n').trim();
         if (fullMessage) {
-          const commandText = `!discord send <#${sendMatch[1]}> ${fullMessage}`;
+          const commandText = sendMatch
+            ? `!discord send <#${sendMatch[1]}> ${fullMessage}`
+            : `!discord send-here ${fullMessage}`;
           console.log(
             `[xangi] Processing discord command from response: ${commandText.slice(0, 50)}...`
           );
@@ -448,7 +489,9 @@ export async function handleDiscordCommandsInResponse(
           i++;
         }
         const fullMessage = bodyLines.join('\n').trimEnd();
-        const commandText = `!discord send <#${sendMatch[1]}> ${fullMessage}`;
+        const commandText = sendMatch
+          ? `!discord send <#${sendMatch[1]}> ${fullMessage}`
+          : `!discord send-here ${fullMessage}`;
         console.log(
           `[xangi] Processing discord command from response: ${commandText.slice(0, 50)}...`
         );
