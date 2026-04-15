@@ -762,11 +762,10 @@ async function main() {
             }
             return stripped;
           };
-          const strippedForCheck = stripCodeBlocksForCheck(redirectedResult);
-          const hasSendToSameChannel =
-            new RegExp(`^!discord\\s+send\\s+<#${effectiveChannelId}>`, 'm').test(
-              strippedForCheck
-            ) || /^!discord\s+send-here\b/m.test(strippedForCheck);
+          const hasSendToSameChannel = new RegExp(
+            `^!discord\\s+send\\s+<#${effectiveChannelId}>`,
+            'm'
+          ).test(stripCodeBlocksForCheck(redirectedResult));
 
           const schedulerConfig = { ...config.scheduler, timezone: config.timezone };
           const feedbackResults = await handleDiscordCommandsInResponse(
