@@ -749,24 +749,6 @@ async function main() {
 
           const effectiveChannelId = threadId || channelId;
 
-          // コードブロック内の !discord send は実行されないため、チェック前に除去する
-          const stripCodeBlocksForCheck = (text: string): string => {
-            let stripped = '';
-            let inBlock = false;
-            for (const line of text.split('\n')) {
-              if (line.trim().startsWith('```')) {
-                inBlock = !inBlock;
-                continue;
-              }
-              if (!inBlock) stripped += line + '\n';
-            }
-            return stripped;
-          };
-          const hasSendToSameChannel = new RegExp(
-            `^!discord\\s+send\\s+<#${effectiveChannelId}>`,
-            'm'
-          ).test(stripCodeBlocksForCheck(redirectedResult));
-
           const schedulerConfig = { ...config.scheduler, timezone: config.timezone };
           const feedbackResults = await handleDiscordCommandsInResponse(
             client,
@@ -826,13 +808,6 @@ async function main() {
               const ch = channel as { send: (content: string) => Promise<unknown> };
               await ch.send('スキップしました');
             }
-            return result;
-          }
-
-          if (hasSendToSameChannel && filePaths.length === 0) {
-            console.log(
-              `[scheduler] Skipping duplicate text send for ${options?.scheduleId ?? 'unknown'}: already sent via !discord send`
-            );
             return result;
           }
 

@@ -132,9 +132,14 @@ export function stripCommandsFromDisplay(text: string): string {
       continue;
     }
 
-    // !discord send の複数行対応: コマンド行と続く行を除去
+    // !discord send の複数行対応: コマンド行（!discord send <#id>）のみ除去し、本文は残す
+    // これにより !discord send が失敗してもフォールバックの display text に本文が残る
     const sendMatch = trimmed.match(/^!discord\s+send\s+<#\d+>\s*(.*)/);
     if (sendMatch) {
+      // 同一行に本文がある場合は残す
+      if (sendMatch[1]) {
+        result.push(sendMatch[1]);
+      }
       i++;
       let inBodyCodeBlock = false;
       while (i < lines.length) {
@@ -148,6 +153,7 @@ export function stripCommandsFromDisplay(text: string): string {
         ) {
           break;
         }
+        result.push(bodyLine); // 本文行は除去しない
         i++;
       }
       continue;

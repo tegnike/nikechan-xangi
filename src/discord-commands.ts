@@ -57,6 +57,11 @@ export async function handleDiscordCommand(
         console.log(`[xangi] Sent message to #${channelName} (${chunks.length} chunk(s))`);
         return { handled: true, response: `✅ #${channelName} にメッセージを送信しました` };
       }
+      // チャンネルが見つからない場合: サイレントfall-throughを防ぎ明示的にエラーを返す
+      console.error(
+        `[xangi] Cannot send to channel ${channelId}: channel not found or not sendable`
+      );
+      return { handled: true, response: `❌ チャンネル <#${channelId}> が見つかりませんでした` };
     } catch (err) {
       console.error(`[xangi] Failed to send message to channel: ${channelId}`, err);
       return { handled: true, response: `❌ チャンネルへの送信に失敗しました` };
