@@ -106,6 +106,24 @@ async function main() {
 
   // スケジューラを初期化（ワークスペースの .xangi を使用）
   const dataDir = process.env.DATA_DIR || join(workdir, '.xangi');
+
+  // チャンネルポリシーを読み込み（.xangi/channel-policies.json）
+  interface ChannelPolicy {
+    comment?: string;
+    deniedTools?: string[];
+  }
+  let channelPolicies: Record<string, ChannelPolicy> = {};
+  const channelPoliciesPath = join(dataDir, 'channel-policies.json');
+  if (existsSync(channelPoliciesPath)) {
+    try {
+      channelPolicies = JSON.parse(readFileSync(channelPoliciesPath, 'utf-8'));
+      console.log(
+        `[xangi] Loaded channel policies for ${Object.keys(channelPolicies).length} channel(s)`
+      );
+    } catch (err) {
+      console.error('[xangi] Failed to load channel-policies.json:', err);
+    }
+  }
   const scheduler = new Scheduler(dataDir, {
     timezone: config.timezone,
   });
@@ -528,11 +546,8 @@ async function main() {
           }
         }
 
-        // プロンプトまたはチャンネルスキルから denied-tools を取得
-        const promptSkillName = prompt.trim().match(/^\/([a-zA-Z0-9_-]+)/)?.[1];
-        const activeSkillName = promptSkillName ?? channelSkillName;
-        const activeSkill = activeSkillName ? skills.find((s) => s.name === activeSkillName) : null;
-        const disallowedTools = activeSkill?.deniedTools ?? [];
+        // チャンネルポリシーから deniedTools を取得
+        const disallowedTools = channelPolicies[channelId]?.deniedTools ?? [];
 
         const result = await processPrompt(
           message,
@@ -738,17 +753,13 @@ async function main() {
           : `[実行チャンネル: <#${channelId}> — !discord send は <#${channelId}> 宛てに書くこと]`;
         const contextualPrompt = `${channelContext}\n${remainingPrompt}`;
 
-        // プロンプトからスキル名を特定し、denied-tools があればワンショットランナーを使用
-        const scheduleSkillName = remainingPrompt.trim().match(/^\/([a-zA-Z0-9_-]+)/)?.[1];
-        const scheduleSkill = scheduleSkillName
-          ? skills.find((s) => s.name === scheduleSkillName)
-          : null;
-        const scheduleDeniedTools = scheduleSkill?.deniedTools ?? [];
+        // チャンネルポリシーから deniedTools を取得し、必要ならワンショットランナーを使用
+        const scheduleDeniedTools = channelPolicies[channelId]?.deniedTools ?? [];
         const scheduleRunner =
           scheduleDeniedTools.length > 0 ? new ClaudeCodeRunner(config.agent.config) : agentRunner;
         if (scheduleDeniedTools.length > 0) {
           console.log(
-            `[scheduler] Using one-shot runner for skill "${scheduleSkillName}" (denied: ${scheduleDeniedTools.join(', ')})`
+            `[scheduler] Using one-shot runner for channel ${channelId} (denied: ${scheduleDeniedTools.join(', ')})`
           );
         }
 
