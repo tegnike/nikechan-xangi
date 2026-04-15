@@ -3,6 +3,48 @@ import { readFile, writeFile, rename, access, unlink, mkdir, appendFile } from '
 import { dirname, join } from 'path';
 import { Cron } from 'croner';
 import { notifyError, formatDuration } from './error-notify.js';
+
+/** JSONC（コメント付きJSON）のコメントを除去してパースする */
+function parseJsonc<T>(text: string): T {
+  // 文字列リテラル内は無視しつつ // と /* */ コメントを除去
+  let result = '';
+  let i = 0;
+  while (i < text.length) {
+    // 文字列リテラル
+    if (text[i] === '"') {
+      let j = i + 1;
+      while (j < text.length) {
+        if (text[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (text[j] === '"') {
+          j++;
+          break;
+        }
+        j++;
+      }
+      result += text.slice(i, j);
+      i = j;
+      continue;
+    }
+    // 行コメント
+    if (text[i] === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      continue;
+    }
+    // ブロックコメント
+    if (text[i] === '/' && text[i + 1] === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    result += text[i++];
+  }
+  return JSON.parse(result) as T;
+}
+
 /** スケジュール一覧の項目間区切り（splitMessage用） */
 export const SCHEDULE_SEPARATOR = '{{SPLIT}}';
 
@@ -82,7 +124,7 @@ export class Scheduler {
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
-    this.filePath = join(dir, 'schedules.json');
+    this.filePath = join(dir, 'schedules.jsonc');
     this.load();
     this.initHeartbeatMdCache();
   }
@@ -519,7 +561,7 @@ export class Scheduler {
     try {
       if (existsSync(this.filePath)) {
         const raw = readFileSync(this.filePath, 'utf-8');
-        this.schedules = JSON.parse(raw);
+        this.schedules = parseJsonc(raw);
         this.log(`[scheduler] Loaded ${this.schedules.length} schedules from ${this.filePath}`);
       }
     } catch (error) {
@@ -532,7 +574,7 @@ export class Scheduler {
     try {
       await access(this.filePath);
       const raw = await readFile(this.filePath, 'utf-8');
-      this.schedules = JSON.parse(raw);
+      this.schedules = parseJsonc(raw);
       this.log(`[scheduler] Loaded ${this.schedules.length} schedules from ${this.filePath}`);
     } catch (error) {
       console.error('[scheduler] Failed to load schedules:', error);

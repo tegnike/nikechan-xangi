@@ -96,7 +96,7 @@ describe('schedule-cli', { timeout: 60000 }, () => {
   it('should persist to JSON file', () => {
     runCli('add --channel ch1 --platform discord "毎日 9:00 永続化テスト"', tmpDir);
 
-    const filePath = join(tmpDir, 'schedules.json');
+    const filePath = join(tmpDir, 'schedules.jsonc');
     const raw = readFileSync(filePath, 'utf-8');
     const data = JSON.parse(raw);
     expect(data.length).toBe(1);
