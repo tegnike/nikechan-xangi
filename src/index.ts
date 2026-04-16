@@ -857,13 +857,8 @@ async function main() {
           const isSilent =
             !cleanedDisplay ||
             cleanedDisplay.includes('[SILENT]') ||
-            (cleanedDisplay.length < 80 &&
-              /(?:quiet\s*hours|NO_SPEAK|スキップ|終了|セッション継続)/i.test(cleanedDisplay));
+            (cleanedDisplay.length < 80 && /(?:quiet\s*hours|NO_SPEAK)/i.test(cleanedDisplay));
           if (isSilent && filePaths.length === 0) {
-            if (threadId) {
-              const ch = channel as { send: (content: string) => Promise<unknown> };
-              await ch.send('スキップしました');
-            }
             return result;
           }
 
