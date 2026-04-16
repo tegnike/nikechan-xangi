@@ -10,6 +10,7 @@ export interface RunOptions {
   sessionId?: string;
   channelId?: string; // プロセス管理用
   disallowedTools?: string[]; // 使用禁止ツールリスト（SKILL.mdの denied-tools から注入）
+  extraEnv?: Record<string, string>; // Claudeプロセスに渡す会話メタデータ
 }
 
 export interface RunResult {

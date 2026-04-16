@@ -13,6 +13,7 @@ import {
 } from './file-utils.js';
 import { loadSettings, saveSettings, formatSettings } from './settings.js';
 import { STREAM_UPDATE_INTERVAL_MS } from './constants.js';
+import { buildAgentExtraEnv } from './run-context.js';
 
 // セッション管理（チャンネルID → セッションID）
 const sessions = new Map<string, string>();
@@ -494,6 +495,12 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
         skipPermissions,
         sessionId,
         channelId,
+        extraEnv: buildAgentExtraEnv({
+          workdir: config.agent.config.workdir,
+          entrypoint: 'slack-skill',
+          platform: 'slack',
+          channelId,
+        }),
       });
 
       sessions.set(channelId, newSessionId);
@@ -572,6 +579,13 @@ async function processMessage(
     const sessionId = sessions.get(channelId);
     const useStreaming = config.slack.streaming ?? true;
     const showThinking = config.slack.showThinking ?? true;
+    const extraEnv = buildAgentExtraEnv({
+      workdir: config.agent.config.workdir,
+      entrypoint: 'slack-message',
+      platform: 'slack',
+      channelId,
+      conversationId: threadTs || channelId,
+    });
 
     // 最初のメッセージを送信
     const initialResponse = await client.chat.postMessage({
@@ -627,7 +641,7 @@ async function processMessage(
             }
           },
         },
-        { skipPermissions, sessionId, channelId }
+        { skipPermissions, sessionId, channelId, extraEnv }
       );
       result = streamResult.result;
       newSessionId = streamResult.sessionId;
@@ -648,7 +662,12 @@ async function processMessage(
       }, 1000);
 
       try {
-        const runResult = await agentRunner.run(prompt, { skipPermissions, sessionId, channelId });
+        const runResult = await agentRunner.run(prompt, {
+          skipPermissions,
+          sessionId,
+          channelId,
+          extraEnv,
+        });
         result = runResult.result;
         newSessionId = runResult.sessionId;
       } finally {

@@ -7,6 +7,7 @@ import { DISCORD_SAFE_LENGTH } from './constants.js';
 import { extractFilePaths, stripFilePaths } from './file-utils.js';
 import { getSession, setSession } from './sessions.js';
 import { loadSettings, saveSettings } from './settings.js';
+import { buildAgentExtraEnv } from './run-context.js';
 
 /**
  * テキストから !discord send コマンドを抽出し、残りのテキストを返す
@@ -231,6 +232,13 @@ export async function processPrompt(
   config: ReturnType<typeof loadConfig>,
   disallowedTools?: string[]
 ): Promise<string | null> {
+  const extraEnv = buildAgentExtraEnv({
+    workdir: config.agent.config.workdir,
+    entrypoint: 'discord-message',
+    platform: 'discord',
+    channelId,
+  });
+
   try {
     // チャンネル情報をプロンプトに付与
     const channelName =
@@ -244,7 +252,6 @@ export async function processPrompt(
     const sessionId = getSession(channelId);
     const useStreaming = config.discord.streaming ?? true;
     const showThinking = config.discord.showThinking ?? true;
-
     // !skip または disallowedTools がある場合、ワンショットランナーを使用
     // （PersistentRunner はプロセス起動時にフラグを設定するため、リクエスト単位での変更不可）
     const defaultSkip = config.agent.config.skipPermissions ?? false;
@@ -339,7 +346,7 @@ export async function processPrompt(
             }
           },
         },
-        { skipPermissions, sessionId, channelId, disallowedTools }
+        { skipPermissions, sessionId, channelId, disallowedTools, extraEnv }
       );
       if (partialTimer) clearTimeout(partialTimer);
       if (pendingSend) await pendingSend;
@@ -352,6 +359,7 @@ export async function processPrompt(
         sessionId,
         channelId,
         disallowedTools,
+        extraEnv,
       });
       result = runResult.result;
       newSessionId = runResult.sessionId;
@@ -473,6 +481,7 @@ export async function processPrompt(
             skipPermissions,
             sessionId,
             channelId,
+            extraEnv,
           });
           if (followUpResult.result) {
             setSession(channelId, followUpResult.sessionId);

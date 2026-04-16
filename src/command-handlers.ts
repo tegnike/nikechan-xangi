@@ -5,6 +5,7 @@ import type { Skill } from './skills.js';
 import { splitMessage } from './message-utils.js';
 import { DISCORD_SAFE_LENGTH } from './constants.js';
 import { getSession, setSession } from './sessions.js';
+import { buildAgentExtraEnv } from './run-context.js';
 
 export async function handleAutocomplete(
   interaction: AutocompleteInteraction,
@@ -46,6 +47,12 @@ export async function handleSkill(
       skipPermissions,
       sessionId,
       channelId,
+      extraEnv: buildAgentExtraEnv({
+        workdir: config.agent.config.workdir,
+        entrypoint: 'discord-skill',
+        platform: 'discord',
+        channelId,
+      }),
     });
 
     setSession(channelId, newSessionId);
@@ -79,6 +86,12 @@ export async function handleSkillCommand(
       skipPermissions,
       sessionId,
       channelId,
+      extraEnv: buildAgentExtraEnv({
+        workdir: config.agent.config.workdir,
+        entrypoint: 'discord-skill',
+        platform: 'discord',
+        channelId,
+      }),
     });
 
     setSession(channelId, newSessionId);

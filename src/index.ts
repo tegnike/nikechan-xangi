@@ -24,6 +24,7 @@ import { initSettings, loadSettings, formatSettings } from './settings.js';
 import { DISCORD_SAFE_LENGTH } from './constants.js';
 import { Scheduler } from './scheduler.js';
 import { initSessions, getSession, setSession, deleteSession } from './sessions.js';
+import { buildAgentExtraEnv } from './run-context.js';
 import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { initErrorNotify, notifyError } from './error-notify.js';
@@ -615,6 +616,12 @@ async function main() {
                 skipPermissions: skipPermissions || (config.agent.config.skipPermissions ?? false),
                 sessionId,
                 channelId,
+                extraEnv: buildAgentExtraEnv({
+                  workdir: config.agent.config.workdir,
+                  entrypoint: 'discord-message',
+                  platform: 'discord',
+                  channelId,
+                }),
               }
             );
             setSession(channelId, newSid);
@@ -770,11 +777,20 @@ async function main() {
 
         try {
           const sessionId = options?.isolated ? undefined : getSession(channelId);
+          const extraEnv = buildAgentExtraEnv({
+            workdir: config.agent.config.workdir,
+            entrypoint: 'scheduler',
+            platform: 'discord',
+            channelId,
+            conversationId: threadId || channelId,
+            scheduleId: options?.scheduleId,
+          });
           const { result, sessionId: newSessionId } = await scheduleRunner.run(contextualPrompt, {
             skipPermissions: config.agent.config.skipPermissions ?? false,
             sessionId,
             channelId: runnerChannelId,
             disallowedTools: scheduleDeniedTools.length > 0 ? scheduleDeniedTools : undefined,
+            extraEnv,
           });
 
           if (!options?.isolated) {
@@ -814,6 +830,7 @@ async function main() {
               sessionId: feedbackSession,
               channelId: runnerChannelId,
               disallowedTools: scheduleDeniedTools.length > 0 ? scheduleDeniedTools : undefined,
+              extraEnv,
             });
             if (!options?.isolated) {
               setSession(channelId, feedbackRun.sessionId);

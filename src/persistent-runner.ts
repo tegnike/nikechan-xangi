@@ -54,6 +54,7 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
   private resumeSessionId?: string; // プロセス再起動時に --resume で復元するセッションID
   private failedSessionIds = new Set<string>(); // 復元に失敗したセッションIDを記憶
   private pendingSessionRecovery = false; // is_errorからclose経由でリカバリするフラグ
+  private processEnvOverrides: NodeJS.ProcessEnv = {};
 
   constructor(options?: {
     model?: string;
@@ -129,7 +130,7 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     this.process = spawn('claude', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.workdir,
-      env: cleanEnv(),
+      env: cleanEnv(this.processEnvOverrides),
     });
     this.processAlive = true;
 
@@ -426,6 +427,8 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     if (this.currentItem || this.queue.length === 0) {
       return;
     }
+
+    this.processEnvOverrides = this.queue[0]?.options?.extraEnv ?? {};
 
     // プロセスを確保（初期プロンプトの送信もここで行われる）
     let proc: ChildProcess;

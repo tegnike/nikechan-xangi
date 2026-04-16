@@ -73,7 +73,7 @@ export class ClaudeCodeRunner {
       : ' (new)';
     console.log(`[claude-code] Executing in ${this.workdir || 'default dir'}${sessionInfo}`);
 
-    const result = await this.execute(args, options?.channelId);
+    const result = await this.execute(args, options?.channelId, options?.extraEnv);
     const response = this.parseResponse(result);
 
     return {
@@ -82,12 +82,16 @@ export class ClaudeCodeRunner {
     };
   }
 
-  private execute(args: string[], channelId?: string): Promise<string> {
+  private execute(
+    args: string[],
+    channelId?: string,
+    extraEnv?: Record<string, string>
+  ): Promise<string> {
     return new Promise((resolve, reject) => {
       const proc = spawn('claude', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
-        env: cleanEnv(),
+        env: cleanEnv(extraEnv),
       });
 
       // プロセスマネージャーに登録
@@ -184,19 +188,20 @@ export class ClaudeCodeRunner {
       : ' (new)';
     console.log(`[claude-code] Streaming in ${this.workdir || 'default dir'}${sessionInfo}`);
 
-    return this.executeStream(args, callbacks, options?.channelId);
+    return this.executeStream(args, callbacks, options?.channelId, options?.extraEnv);
   }
 
   private executeStream(
     args: string[],
     callbacks: StreamCallbacks,
-    channelId?: string
+    channelId?: string,
+    extraEnv?: Record<string, string>
   ): Promise<RunResult> {
     return new Promise((resolve, reject) => {
       const proc = spawn('claude', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
-        env: cleanEnv(),
+        env: cleanEnv(extraEnv),
       });
 
       // プロセスマネージャーに登録
