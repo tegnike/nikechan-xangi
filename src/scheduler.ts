@@ -99,6 +99,7 @@ export class Scheduler {
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
   private heartbeatRunning = new Map<string, boolean>();
+  private executingJobs = new Set<string>();
   private filePath: string;
   private senders = new Map<Platform, SendMessageFn>();
   private agentRunners = new Map<Platform, AgentRunFn>();
@@ -484,54 +485,64 @@ export class Scheduler {
     }
   }
   private async executeJob(schedule: Schedule): Promise<void> {
-    // 常にagentモードで実行
-    const agentRunner = this.agentRunners.get(schedule.platform);
-    if (!agentRunner) {
-      // agentRunnerがない場合はフォールバック
-      const sender = this.senders.get(schedule.platform);
-      if (sender) {
-        const prefix = schedule.label ? `⏰ **${schedule.label}**\n` : '⏰ ';
-        await sender(schedule.channelId, `${prefix}${schedule.message}`);
-        this.log(`[scheduler] Executed (fallback): ${schedule.id} → ${schedule.channelId}`);
-      } else {
-        console.error(`[scheduler] No runner/sender for platform: ${schedule.platform}`);
-      }
+    // 同一ジョブの同時実行を防ぐ（cron/heartbeat/startup共通）
+    if (this.executingJobs.has(schedule.id)) {
+      this.log(`[scheduler] Job ${schedule.id} already running, skipping duplicate trigger`);
       return;
     }
-    const startTime = Date.now();
-    const runAgent = () =>
-      agentRunner(schedule.message, schedule.channelId, {
-        isolated: schedule.isolated,
-        thread: schedule.thread,
-        scheduleId: schedule.id,
-        scheduleLabel: schedule.label,
-      });
+    this.executingJobs.add(schedule.id);
     try {
-      this.log(`[scheduler] Running agent for: ${schedule.id}`);
-      let result: string;
-      try {
-        result = await runAgent();
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes('shutting down')) {
-          this.log(`[scheduler] Runner was shutting down for ${schedule.id}, retrying...`);
-          await new Promise((r) => setTimeout(r, 2000));
-          result = await runAgent();
+      // 常にagentモードで実行
+      const agentRunner = this.agentRunners.get(schedule.platform);
+      if (!agentRunner) {
+        // agentRunnerがない場合はフォールバック
+        const sender = this.senders.get(schedule.platform);
+        if (sender) {
+          const prefix = schedule.label ? `⏰ **${schedule.label}**\n` : '⏰ ';
+          await sender(schedule.channelId, `${prefix}${schedule.message}`);
+          this.log(`[scheduler] Executed (fallback): ${schedule.id} → ${schedule.channelId}`);
         } else {
-          throw err;
+          console.error(`[scheduler] No runner/sender for platform: ${schedule.platform}`);
         }
+        return;
       }
-      this.log(`[scheduler] Agent completed: ${schedule.id} (${result.length} chars)`);
-      this.writeJobLog(schedule.id, 'completed', Date.now() - startTime, result.length);
-    } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
-      console.error(`[scheduler] Failed to execute ${schedule.id}:`, error);
-      this.writeJobLog(schedule.id, 'error', Date.now() - startTime, 0, errMsg);
-      const label = schedule.label || schedule.id;
-      notifyError('スケジューラーエラー', errMsg, {
-        ジョブ: `${label} (\`${schedule.id}\`)`,
-        実行時間: formatDuration(Date.now() - startTime),
-      });
+      const startTime = Date.now();
+      const runAgent = () =>
+        agentRunner(schedule.message, schedule.channelId, {
+          isolated: schedule.isolated,
+          thread: schedule.thread,
+          scheduleId: schedule.id,
+          scheduleLabel: schedule.label,
+        });
+      try {
+        this.log(`[scheduler] Running agent for: ${schedule.id}`);
+        let result: string;
+        try {
+          result = await runAgent();
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes('shutting down')) {
+            this.log(`[scheduler] Runner was shutting down for ${schedule.id}, retrying...`);
+            await new Promise((r) => setTimeout(r, 2000));
+            result = await runAgent();
+          } else {
+            throw err;
+          }
+        }
+        this.log(`[scheduler] Agent completed: ${schedule.id} (${result.length} chars)`);
+        this.writeJobLog(schedule.id, 'completed', Date.now() - startTime, result.length);
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        console.error(`[scheduler] Failed to execute ${schedule.id}:`, error);
+        this.writeJobLog(schedule.id, 'error', Date.now() - startTime, 0, errMsg);
+        const label = schedule.label || schedule.id;
+        notifyError('スケジューラーエラー', errMsg, {
+          ジョブ: `${label} (\`${schedule.id}\`)`,
+          実行時間: formatDuration(Date.now() - startTime),
+        });
+      }
+    } finally {
+      this.executingJobs.delete(schedule.id);
     }
   }
   private writeJobLog(
