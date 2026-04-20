@@ -61,6 +61,10 @@ RUN uv python install 3.12 && \
 # Install yt-dlp via uv
 RUN uv tool install yt-dlp
 
+# Install OpenCC (C++ binding) into a dedicated venv for Chinese-character filtering
+RUN uv venv /home/node/.venvs/opencc --python 3.12 && \
+    uv pip install --python /home/node/.venvs/opencc/bin/python opencc
+
 # Install Claude Code CLI as node user
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
