@@ -441,6 +441,14 @@ async function main() {
     recentMessageIds.add(message.id);
     setTimeout(() => recentMessageIds.delete(message.id), 60000);
 
+    // システムメッセージ（スレッド作成通知・ピン留め通知など）は無視
+    if (message.system) {
+      console.log(
+        `[xangi:debug] Skip system message: msgId=${message.id}, type=${message.type}, channelId=${message.channel.id}`
+      );
+      return;
+    }
+
     const isMentioned = message.mentions.has(client.user!);
     const isDM = !message.guild;
     const parentId = 'parentId' in message.channel ? message.channel.parentId : null;
