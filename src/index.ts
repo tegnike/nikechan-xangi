@@ -552,6 +552,7 @@ async function main() {
         const extraEnvOverrides: Record<string, string> = {};
         if (channelSkillName === 'karakuri-world') {
           extraEnvOverrides.KARAKURI_HAS_CHOICES = prompt.includes('選択肢:') ? 'true' : 'false';
+          extraEnvOverrides.KARAKURI_ACTION_LOCK_KEY = message.id;
           console.log(
             `[xangi] karakuri-world: KARAKURI_HAS_CHOICES=${extraEnvOverrides.KARAKURI_HAS_CHOICES}`
           );
