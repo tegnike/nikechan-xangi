@@ -230,13 +230,15 @@ export async function processPrompt(
   skipPermissions: boolean,
   channelId: string,
   config: ReturnType<typeof loadConfig>,
-  disallowedTools?: string[]
+  disallowedTools?: string[],
+  extraEnvOverrides?: Record<string, string>
 ): Promise<string | null> {
   const extraEnv = buildAgentExtraEnv({
     workdir: config.agent.config.workdir,
     entrypoint: 'discord-message',
     platform: 'discord',
     channelId,
+    extraEnv: extraEnvOverrides,
   });
 
   try {

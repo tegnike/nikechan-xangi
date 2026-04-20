@@ -7,6 +7,7 @@ export interface AgentExtraEnvOptions {
   channelId: string;
   conversationId?: string;
   scheduleId?: string;
+  extraEnv?: Record<string, string>;
 }
 
 export function resolveDataDir(workdir?: string): string {
@@ -25,6 +26,10 @@ export function buildAgentExtraEnv(options: AgentExtraEnvOptions): Record<string
 
   if (options.scheduleId) {
     env.XANGI_SCHEDULE_ID = options.scheduleId;
+  }
+
+  if (options.extraEnv) {
+    Object.assign(env, options.extraEnv);
   }
 
   return env;

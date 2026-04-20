@@ -547,6 +547,16 @@ async function main() {
       try {
         // チャンネルに紐づくスキルのSKILL.mdを前置注入
         const channelSkillName = config.discord.channelSkills?.[channelId];
+
+        // karakuri-worldチャンネルの場合、選択肢の有無を機械的に判定してClaude環境変数に注入
+        const extraEnvOverrides: Record<string, string> = {};
+        if (channelSkillName === 'karakuri-world') {
+          extraEnvOverrides.KARAKURI_HAS_CHOICES = prompt.includes('選択肢:') ? 'true' : 'false';
+          console.log(
+            `[xangi] karakuri-world: KARAKURI_HAS_CHOICES=${extraEnvOverrides.KARAKURI_HAS_CHOICES}`
+          );
+        }
+
         if (channelSkillName) {
           const skill = skills.find((s) => s.name === channelSkillName);
           if (skill && existsSync(skill.path)) {
@@ -566,7 +576,8 @@ async function main() {
           skipPermissions,
           channelId,
           config,
-          disallowedTools.length > 0 ? disallowedTools : undefined
+          disallowedTools.length > 0 ? disallowedTools : undefined,
+          Object.keys(extraEnvOverrides).length > 0 ? extraEnvOverrides : undefined
         );
 
         if (result) {
