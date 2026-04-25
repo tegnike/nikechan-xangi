@@ -45,6 +45,7 @@ import {
   getDisplayChunks,
   handleSettingsFromResponse,
 } from './prompt-processor.js';
+import { runKarakuriWorkflow } from './workflows/karakuri.js';
 import {
   handleScheduleCommand,
   handleScheduleMessage,
@@ -548,15 +549,27 @@ async function main() {
         // チャンネルに紐づくスキルのSKILL.mdを前置注入
         const channelSkillName = config.discord.channelSkills?.[channelId];
 
-        // karakuri-worldチャンネルの場合、選択肢の有無を機械的に判定してClaude環境変数に注入
-        const extraEnvOverrides: Record<string, string> = {};
+        // karakuri-worldチャンネルはワークフローで処理（LLMセッションを使わない）
         if (channelSkillName === 'karakuri-world') {
-          extraEnvOverrides.KARAKURI_HAS_CHOICES = prompt.includes('選択肢:') ? 'true' : 'false';
-          extraEnvOverrides.KARAKURI_ACTION_LOCK_KEY = message.id;
-          console.log(
-            `[xangi] karakuri-world: KARAKURI_HAS_CHOICES=${extraEnvOverrides.KARAKURI_HAS_CHOICES}`
-          );
+          const reportChannelId = config.discord.channelReports?.[channelId];
+          await runKarakuriWorkflow(prompt, {
+            messageId: message.id,
+            sendReport: async (text: string) => {
+              if (!message.channel || !('send' in message.channel)) return;
+              await (message.channel as { send: (c: string) => Promise<unknown> }).send(text);
+              // レポートチャンネルにも転送
+              if (reportChannelId) {
+                const ch = await client.channels.fetch(reportChannelId).catch(() => null);
+                if (ch && 'send' in ch) {
+                  await (ch as { send: (c: string) => Promise<unknown> }).send(text);
+                }
+              }
+            },
+          });
+          return;
         }
+
+        const extraEnvOverrides: Record<string, string> = {};
 
         if (channelSkillName) {
           const skill = skills.find((s) => s.name === channelSkillName);
