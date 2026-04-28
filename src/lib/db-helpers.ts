@@ -76,6 +76,38 @@ export async function addKarakuriActivityLog(
   return rows[0] ?? null;
 }
 
+export interface ElythActivityLogInput {
+  discord_message_id?: string;
+  channel_id?: string;
+  author_id?: string;
+  author_name?: string;
+  message_created_at?: string;
+  run_key?: string;
+  stage: 'fetch' | 'plan' | 'dry_run' | 'execute' | 'error';
+  raw_content: string;
+  parsed?: JsonObject;
+  created_by?: string;
+}
+
+export interface ElythActivityLogRow {
+  id: string;
+  created_at?: string | null;
+  stage: string;
+  raw_content: string;
+  parsed?: JsonObject | null;
+}
+
+export async function addElythActivityLog(
+  input: ElythActivityLogInput
+): Promise<ElythActivityLogRow | null> {
+  const rows = await supabasePost<ElythActivityLogRow[]>('elyth_activity_logs', {
+    ...input,
+    parsed: input.parsed ?? {},
+    created_by: input.created_by ?? 'xangi',
+  });
+  return rows[0] ?? null;
+}
+
 export interface KarakuriActivityLogRow {
   id: string;
   message_created_at?: string | null;
@@ -561,6 +593,20 @@ export interface KarakuriPersonContext {
   relationship?: string | null;
 }
 
+export interface ElythPersonContext {
+  userId: string;
+  handle: string;
+  displayName: string;
+  name?: string | null;
+  nickname?: string | null;
+  bio?: string | null;
+  memo?: string | null;
+  context?: string | null;
+  relationship?: string | null;
+  isFollowed?: boolean | null;
+  recentEpisodes?: string;
+}
+
 export async function ensureKarakuriUser(
   agentId: string,
   agentName: string
@@ -590,6 +636,134 @@ export async function ensureKarakuriUser(
     needsMemoInit,
     needsNicknameInit,
   };
+}
+
+export async function ensureElythUser(
+  handle: string,
+  displayName: string
+): Promise<{ person: ElythPersonContext; needsMemoInit: boolean; needsNicknameInit: boolean }> {
+  const cleanHandle = normalizeElythHandle(handle);
+  const raw = await runDbSh(['user-ensure', 'elyth', cleanHandle, cleanHandle, displayName]);
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new Error(`user-ensure elyth returned non-JSON: ${raw.slice(0, 100)}`);
+  }
+  const id = data.id as string;
+  const person = userJsonToElythPerson(data, cleanHandle, displayName);
+  return {
+    person: { ...person, userId: id },
+    needsMemoInit: !data.memo,
+    needsNicknameInit: !data.nickname,
+  };
+}
+
+export async function getElythPersonByHandle(handle: string): Promise<ElythPersonContext | null> {
+  const cleanHandle = normalizeElythHandle(handle);
+  const raw = await runDbSh(['user-get-by-platform', 'elyth', cleanHandle]).catch(() => 'null');
+  if (!raw || raw === 'null') return null;
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!data.id) return null;
+  return userJsonToElythPerson(data, cleanHandle, cleanHandle);
+}
+
+export async function getElythPeopleList(): Promise<ElythPersonContext[]> {
+  const raw = await runDbSh(['elyth-list']).catch(() => '[]');
+  let rows: unknown[];
+  try {
+    rows = JSON.parse(raw) as unknown[];
+  } catch {
+    return [];
+  }
+  const people: Array<ElythPersonContext | null> = rows.map((row) => {
+    const record = row && typeof row === 'object' ? (row as Record<string, unknown>) : null;
+    if (!record) return null;
+    const users = Array.isArray(record.users)
+      ? (record.users[0] as Record<string, unknown> | undefined)
+      : (record.users as Record<string, unknown> | undefined);
+    if (!users?.id) return null;
+    const handle = String(record.platform_user_id ?? '');
+    return {
+      userId: String(users.id),
+      handle,
+      displayName: String(record.display_name ?? handle),
+      name: typeof users.name === 'string' ? users.name : null,
+      nickname: typeof users.nickname === 'string' ? users.nickname : null,
+      bio: typeof users.bio === 'string' ? users.bio : null,
+      memo: typeof users.memo === 'string' ? users.memo : null,
+      context: typeof users.context === 'string' ? users.context : null,
+      relationship: typeof users.relationship === 'string' ? users.relationship : null,
+      isFollowed: typeof record.is_followed === 'boolean' ? record.is_followed : null,
+    };
+  });
+  return people.filter((person): person is ElythPersonContext => person !== null);
+}
+
+export async function addElythObservationEpisode(
+  userId: string,
+  content: string,
+  sourceRecordId: string
+): Promise<void> {
+  await runDbSh([
+    'ce-add-ref',
+    userId,
+    content,
+    'elyth',
+    'observation',
+    'elyth_activity_logs',
+    sourceRecordId,
+  ]);
+}
+
+export interface ElythPostLogInput {
+  actionType: 'post' | 'reply' | 'like' | 'follow';
+  content?: string;
+  authorHandle?: string;
+  postId?: string;
+  replyToId?: string;
+  context?: string;
+}
+
+export interface ElythPostLogRow {
+  id: number;
+  action_type: string;
+  content?: string | null;
+  author_handle?: string | null;
+  post_id?: string | null;
+  reply_to_id?: string | null;
+  context?: string | null;
+  created_at?: string | null;
+}
+
+export async function addElythPostLog(input: ElythPostLogInput): Promise<ElythPostLogRow | null> {
+  const rows = await supabasePost<ElythPostLogRow[]>('elyth_posts', {
+    action_type: input.actionType,
+    content: input.content ?? null,
+    author_handle: input.authorHandle ?? null,
+    post_id: input.postId ?? null,
+    reply_to_id: input.replyToId ?? null,
+    context: input.context ?? null,
+  });
+  return rows[0] ?? null;
+}
+
+export async function addElythContactEpisode(
+  userId: string,
+  content: string,
+  eventType: 'reply' | 'like' | 'follow' | 'observation',
+  sourceRecordId: string
+): Promise<void> {
+  await runDbSh(['ce-add-ref', userId, content, 'elyth', eventType, 'elyth_posts', sourceRecordId]);
+}
+
+export async function setElythFollowed(handle: string, value: boolean): Promise<void> {
+  await runDbSh(['elyth-is-followed', normalizeElythHandle(handle), String(value)]);
 }
 
 export async function updateKarakuriPlatformDisplayName(
@@ -694,4 +868,46 @@ export function formatKarakuriPersonContext(people: KarakuriPersonContext[]): st
       return `- ${details.join(' / ')}`;
     })
     .join('\n');
+}
+
+export function formatElythPersonContext(people: ElythPersonContext[]): string {
+  if (!people.length) return '（人物情報なし）';
+  return people
+    .map((person) => {
+      const canonicalName = person.nickname || person.displayName || person.handle;
+      const details = [
+        `@${person.handle}`,
+        `表示名=${person.displayName}`,
+        `呼称=${canonicalName}`,
+        person.isFollowed === true ? 'followed=true' : '',
+        person.relationship ? `relationship=${person.relationship}` : '',
+        person.memo ? `memo=${person.memo}` : '',
+        person.context ? `context=${person.context}` : '',
+        person.recentEpisodes ? `recent=${person.recentEpisodes.slice(0, 240)}` : '',
+      ].filter(Boolean);
+      return `- ${details.join(' / ')}`;
+    })
+    .join('\n');
+}
+
+function normalizeElythHandle(handle: string): string {
+  return handle.trim().replace(/^@/, '');
+}
+
+function userJsonToElythPerson(
+  data: Record<string, unknown>,
+  handle: string,
+  displayName: string
+): ElythPersonContext {
+  return {
+    userId: String(data.id ?? ''),
+    handle,
+    displayName,
+    name: typeof data.name === 'string' ? data.name : null,
+    nickname: typeof data.nickname === 'string' ? data.nickname : null,
+    bio: typeof data.bio === 'string' ? data.bio : null,
+    memo: typeof data.memo === 'string' ? data.memo : null,
+    context: typeof data.context === 'string' ? data.context : null,
+    relationship: typeof data.relationship === 'string' ? data.relationship : null,
+  };
 }

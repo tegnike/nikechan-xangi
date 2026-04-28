@@ -46,11 +46,16 @@ import {
   handleSettingsFromResponse,
 } from './prompt-processor.js';
 import { runKarakuriWorkflow } from './workflows/karakuri.js';
+import { runElythWorkflow } from './workflows/elyth.js';
 import {
   handleScheduleCommand,
   handleScheduleMessage,
   executeScheduleFromResponse,
 } from './schedule-handler.js';
+
+function isElythWorkflowPrompt(prompt: string): boolean {
+  return /^\/elyth-activity(?:\s|（|\(|$)/.test(prompt.trim());
+}
 
 async function main() {
   const config = loadConfig();
@@ -548,6 +553,37 @@ async function main() {
       try {
         // チャンネルに紐づくスキルのSKILL.mdを前置注入
         const channelSkillName = config.discord.channelSkills?.[channelId];
+
+        if (isElythWorkflowPrompt(prompt)) {
+          await runElythWorkflow({
+            messageId: message.id,
+            channelId: message.channel.id,
+            authorId: message.author.id,
+            authorName: message.author.username,
+            messageCreatedAt: message.createdAt.toISOString(),
+            sendReport: async (text: string) => {
+              if (!message.channel || !('send' in message.channel)) return undefined;
+              const sent = (await (
+                message.channel as { send: (c: string) => Promise<Message> }
+              ).send(text)) as Message;
+              const reportChannelId = config.discord.channelReports?.[channelId];
+              if (reportChannelId) {
+                const ch = await client.channels.fetch(reportChannelId).catch(() => null);
+                if (ch && 'send' in ch) {
+                  await (ch as { send: (c: string) => Promise<unknown> }).send(text);
+                }
+              }
+              return {
+                messageId: sent.id,
+                channelId: sent.channel.id,
+                authorId: sent.author.id,
+                authorName: sent.author.username,
+                createdAt: sent.createdAt.toISOString(),
+              };
+            },
+          });
+          return;
+        }
 
         // karakuri-worldチャンネルはワークフローで処理（LLMセッションを使わない）
         if (channelSkillName === 'karakuri-world') {
