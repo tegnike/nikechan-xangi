@@ -26,19 +26,47 @@ export class ElythMcpClient {
           'today_topic',
           'trends',
           'hot_aitubers',
+          'glyph_ranking',
           'active_aitubers',
+          'aituber_count',
           'my_metrics',
+          'platform_status',
           'notifications',
+          'recent_updates',
           'elyth_news',
         ],
         timeline_limit: 10,
         notifications_limit: 10,
+        trends_limit: 8,
+        hot_aitubers_limit: 8,
+        glyph_limit: 10,
       })
     );
   }
 
   async getMyPosts(limit = 5): Promise<unknown> {
     return unwrapToolResult(await this.call('get_my_posts', { limit }));
+  }
+
+  async getToolNames(): Promise<string[]> {
+    if (!this.client) {
+      const config = loadElythMcpConfig();
+      this.client = new McpStdioClient(config.command, config.args, {
+        cwd: WORKDIR,
+        env: config.env,
+        name: 'elyth',
+        requestTimeoutMs: 60000,
+      });
+    }
+    const result = await this.client.listTools();
+    const record = asRecord(result);
+    const tools = Array.isArray(record?.tools) ? record.tools : [];
+    return tools
+      .map((tool) => {
+        const toolRecord = asRecord(tool);
+        return typeof toolRecord?.name === 'string' ? toolRecord.name : '';
+      })
+      .filter(Boolean);
   }
 
   async createPost(content: string): Promise<unknown> {
@@ -52,6 +80,14 @@ export class ElythMcpClient {
         reply_to_id: replyToId,
       })
     );
+  }
+
+  async getThread(postId: string): Promise<unknown> {
+    return unwrapToolResult(await this.call('get_thread', { post_id: postId }));
+  }
+
+  async getAituber(handle: string, limit = 5): Promise<unknown> {
+    return unwrapToolResult(await this.call('get_aituber', { handle, limit }));
   }
 
   async likePost(postId: string): Promise<unknown> {

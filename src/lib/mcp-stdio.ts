@@ -93,6 +93,11 @@ export class McpStdioClient {
     });
   }
 
+  async listTools(): Promise<unknown> {
+    if (!this.initialized) await this.start();
+    return this.request('tools/list');
+  }
+
   async close(): Promise<void> {
     if (!this.proc) return;
     const proc = this.proc;

@@ -8,6 +8,8 @@ export interface ElythPostCandidate {
   content: string;
   kind: 'notification' | 'timeline';
   isHuman: boolean;
+  threadContext?: string;
+  threadHasSelf?: boolean;
   raw: unknown;
 }
 
@@ -48,6 +50,12 @@ export function buildElythCandidates(information: unknown): {
   trends: unknown[];
   hotAitubers: unknown[];
   activeAitubers: unknown[];
+  glyphRanking: unknown[];
+  platformStatus?: unknown;
+  recentUpdates: unknown[];
+  aituberCount?: unknown;
+  elythNews: unknown[];
+  imageGenerationLog: unknown[];
 } {
   const info = unwrapDataObject(information);
   return {
@@ -61,6 +69,13 @@ export function buildElythCandidates(information: unknown): {
     trends: getArray(info, ['trends', 'トレンド']),
     hotAitubers: getArray(info, ['hot_aitubers', 'hotAitubers', '注目AITuber']),
     activeAitubers: getArray(info, ['active_aitubers', 'activeAitubers', 'アクティブAITuber']),
+    glyphRanking: getArray(info, ['glyph_ranking', 'glyphRanking', 'GLYPHランキング']),
+    platformStatus:
+      info.platform_status ?? info.platformStatus ?? info['プラットフォーム状態'] ?? null,
+    recentUpdates: getArray(info, ['recent_updates', 'recentUpdates', '最近のアップデート']),
+    aituberCount: info.aituber_count ?? info.aituberCount ?? info['AITuber総数'] ?? null,
+    elythNews: getArray(info, ['elyth_news', 'elythNews', 'ELYTHニュース']),
+    imageGenerationLog: getArray(info, ['image_generation_log', 'imageGenerationLog']),
   };
 }
 
@@ -93,6 +108,10 @@ export function validateElythPlan(
         dropped.push(`通知返信: Human判定のため除外 ${reply.post_id}`);
         return false;
       }
+      if (candidateById.get(reply.post_id)?.threadHasSelf) {
+        dropped.push(`通知返信: 既に参加済みスレッドのため除外 ${reply.post_id}`);
+        return false;
+      }
       return true;
     })
     .slice(0, 2);
@@ -123,6 +142,10 @@ export function validateElythPlan(
       }
       if (candidateById.get(reply.post_id)?.authorHandle === 'nikechan') {
         dropped.push(`TL返信: 自分の投稿を除外 ${reply.post_id}`);
+        return false;
+      }
+      if (candidateById.get(reply.post_id)?.threadHasSelf) {
+        dropped.push(`TL返信: 既に参加済みスレッドのため除外 ${reply.post_id}`);
         return false;
       }
       return true;
@@ -161,8 +184,14 @@ export function emptyElythPlan(): ElythPlan {
 }
 
 export function formatCandidateForPrompt(candidate: ElythPostCandidate): string {
-  const label = candidate.isHuman ? 'Human/自動返信禁止' : 'AIキャラ';
-  return `- id=${candidate.id} / @${candidate.authorHandle}（${candidate.authorName}）/${label}: ${candidate.content.slice(0, 180)}`;
+  const labels = [
+    candidate.isHuman ? 'Human/自動返信禁止' : 'AIキャラ',
+    candidate.threadHasSelf ? '既に参加済みスレッド/返信禁止' : '',
+  ].filter(Boolean);
+  const thread = candidate.threadContext
+    ? `\n  thread=${candidate.threadContext.slice(0, 300)}`
+    : '';
+  return `- id=${candidate.id} / @${candidate.authorHandle}（${candidate.authorName}）/${labels.join(',')}: ${candidate.content.slice(0, 180)}${thread}`;
 }
 
 export function getCandidateById(

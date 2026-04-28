@@ -11,6 +11,7 @@ import {
   recordEmotionShift,
   setElythFollowed,
   touchUser,
+  updateUserBio,
   type ElythPersonContext,
   type ElythPostLogRow,
 } from '../lib/db-helpers.js';
@@ -52,16 +53,26 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
 
   try {
     const [emotion, knownPeople] = await Promise.all([getEmotion(), getElythPeopleList()]);
+    const availableTools = new Set(await mcp.getToolNames().catch(() => []));
     const information = await mcp.getInformation();
     const myPosts = await mcp.getMyPosts(5);
 
     const candidates = buildElythCandidates(information);
+    await enrichCandidateThreads(
+      mcp,
+      availableTools,
+      candidates.notifications,
+      candidates.timeline
+    );
     const allCandidates = [...candidates.notifications, ...candidates.timeline]
       .filter((candidate) => candidate.authorHandle !== 'unknown')
       .filter((candidate) => candidate.authorHandle !== 'nikechan');
     const people = await ensureCandidatePeople(allCandidates, knownPeople);
+    await enrichPeopleProfiles(mcp, availableTools, people);
     const personContext = formatElythPersonContext(people);
     const emotionText = formatEmotion(emotion);
+    const worldContext = formatElythWorldContext(candidates);
+    const humanNotificationsText = formatHumanNotifications(candidates.notifications);
 
     const fetchLog = await addElythActivityLog({
       discord_message_id: opts.messageId,
@@ -76,8 +87,13 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
         dry_run: dryRun,
         execution_blocked: executionBlocked,
         notifications_count: candidates.notifications.length,
+        human_notifications_count: candidates.notifications.filter((candidate) => candidate.isHuman)
+          .length,
         timeline_count: candidates.timeline.length,
         today_topic: candidates.todayTopic ?? null,
+        world_context: worldContext,
+        available_tools: [...availableTools],
+        image_generation_log_count: candidates.imageGenerationLog.length,
         people_count: people.length,
       },
     }).catch((e) => {
@@ -91,6 +107,8 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
       notifications: candidates.notifications,
       timeline: candidates.timeline,
       todayTopic: candidates.todayTopic,
+      worldContext,
+      humanNotificationsText,
       myPostsText: formatMyPosts(myPosts),
     }).catch((e) => {
       console.error('[elyth] LLM plan failed:', e);
@@ -115,6 +133,14 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
         request_log_id: fetchLog?.id ?? null,
         dry_run: dryRun,
         execution_blocked: executionBlocked,
+        human_notifications: candidates.notifications
+          .filter((candidate) => candidate.isHuman)
+          .map((candidate) => ({
+            id: candidate.id,
+            notification_id: candidate.notificationId ?? null,
+            author: candidate.authorName,
+            content: candidate.content.slice(0, 180),
+          })),
         plan,
         validated,
       },
@@ -168,6 +194,52 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
   } finally {
     await mcp.close().catch(() => {});
   }
+}
+
+async function enrichCandidateThreads(
+  mcp: ElythMcpClient,
+  availableTools: Set<string>,
+  notifications: ElythPostCandidate[],
+  timeline: ElythPostCandidate[]
+): Promise<void> {
+  if (!availableTools.has('get_thread')) return;
+  const targets = uniqueCandidates([
+    ...notifications,
+    ...timeline.filter((candidate) => !candidate.isHuman).slice(0, 6),
+  ]).slice(0, 16);
+
+  await runWithConcurrency(targets, 4, async (candidate) => {
+    try {
+      const thread = await mcp.getThread(candidate.postId);
+      candidate.threadContext = formatThreadContext(thread);
+      candidate.threadHasSelf = threadHasHandle(thread, 'nikechan');
+    } catch (err) {
+      candidate.threadContext = `取得失敗: ${errorMessage(err)}`;
+    }
+  });
+}
+
+async function enrichPeopleProfiles(
+  mcp: ElythMcpClient,
+  availableTools: Set<string>,
+  people: ElythPersonContext[]
+): Promise<void> {
+  if (!availableTools.has('get_aituber')) return;
+  await runWithConcurrency(people.slice(0, 12), 4, async (person) => {
+    try {
+      const profile = await mcp.getAituber(person.handle, 5);
+      const profileContext = formatAituberProfile(profile);
+      if (profileContext) person.profileContext = profileContext;
+
+      const bio = extractAituberBio(profile);
+      if (bio && !person.bio) {
+        person.bio = bio;
+        await updateUserBio(person.userId, bio.slice(0, 200)).catch(() => {});
+      }
+    } catch (err) {
+      person.profileContext = `プロフィール取得失敗: ${errorMessage(err)}`;
+    }
+  });
 }
 
 async function ensureCandidatePeople(
@@ -470,6 +542,11 @@ function buildDryRunReport(
     lines.push(`⚠️ 除外: ${plan.dropped.join(' / ')}`);
   }
 
+  const humanNotifications = context.notifications.filter((candidate) => candidate.isHuman);
+  if (humanNotifications.length) {
+    lines.push(`👤 Human通知: ${humanNotifications.length}件（自動返信せず既読処理）`);
+  }
+
   if (
     !plan.notification_replies.length &&
     !plan.timeline_replies.length &&
@@ -501,6 +578,47 @@ function buildDryRunReport(
   return lines.join('\n').trim();
 }
 
+function formatElythWorldContext(candidates: ReturnType<typeof buildElythCandidates>): string {
+  const parts = [
+    candidates.platformStatus
+      ? `platform_status=${compactJson(candidates.platformStatus, 240)}`
+      : '',
+    candidates.aituberCount ? `aituber_count=${compactJson(candidates.aituberCount, 120)}` : '',
+    candidates.recentUpdates.length
+      ? `recent_updates=${compactJson(candidates.recentUpdates.slice(0, 3), 360)}`
+      : '',
+    candidates.elythNews.length
+      ? `elyth_news=${compactJson(candidates.elythNews.slice(0, 3), 360)}`
+      : '',
+    candidates.glyphRanking.length
+      ? `glyph_ranking=${compactJson(candidates.glyphRanking.slice(0, 5), 300)}`
+      : '',
+    candidates.trends.length ? `trends=${compactJson(candidates.trends.slice(0, 5), 300)}` : '',
+    candidates.hotAitubers.length
+      ? `hot_aitubers=${compactJson(candidates.hotAitubers.slice(0, 5), 300)}`
+      : '',
+    candidates.activeAitubers.length
+      ? `active_aitubers=${compactJson(candidates.activeAitubers.slice(0, 5), 300)}`
+      : '',
+    candidates.imageGenerationLog.length
+      ? `image_generation_log=${compactJson(candidates.imageGenerationLog.slice(0, 5), 300)}`
+      : '',
+  ].filter(Boolean);
+  return parts.join('\n') || '（追加の世界情報なし）';
+}
+
+function formatHumanNotifications(notifications: ElythPostCandidate[]): string {
+  const human = notifications.filter((candidate) => candidate.isHuman);
+  if (!human.length) return '（なし）';
+  return human
+    .slice(0, 5)
+    .map(
+      (candidate) =>
+        `- id=${candidate.id} / ${candidate.authorName}: ${candidate.content.slice(0, 180)}`
+    )
+    .join('\n');
+}
+
 function formatMyPosts(value: unknown): string {
   if (typeof value === 'string') return value.slice(0, 1200);
   try {
@@ -508,6 +626,140 @@ function formatMyPosts(value: unknown): string {
   } catch {
     return '';
   }
+}
+
+function formatThreadContext(value: unknown): string {
+  const posts = getArrayByKeys(value, ['スレッド', 'thread', 'posts', 'data']);
+  if (!posts.length) return compactJson(value, 500);
+  return posts
+    .slice(0, 6)
+    .map((post) => {
+      const record = asRecord(post) ?? {};
+      const author = getStringByKeys(record, ['投稿者', 'author', 'author_handle', 'authorHandle']);
+      const content = getStringByKeys(record, ['内容', 'content', 'text', 'body']);
+      return `${author || 'unknown'}: ${content.slice(0, 120)}`;
+    })
+    .join(' / ');
+}
+
+function threadHasHandle(value: unknown, handle: string): boolean {
+  const normalized = handle.replace(/^@/, '').toLowerCase();
+  const posts = getArrayByKeys(value, ['スレッド', 'thread', 'posts', 'data']);
+  const haystack = (posts.length ? posts : [value])
+    .map((item) => compactJson(item, 800))
+    .join('\n')
+    .toLowerCase();
+  return new RegExp(`@?${escapeRegExp(normalized)}\\b`).test(haystack);
+}
+
+function formatAituberProfile(value: unknown): string {
+  const root = unwrapDataObject(value);
+  const profile = asRecord(root['プロフィール']) ?? asRecord(root.profile) ?? root;
+  const latest = getArrayByKeys(root, ['最新投稿', 'latest_posts', 'posts']);
+  const details = [
+    getStringByKeys(profile, ['名前', 'name'])
+      ? `name=${getStringByKeys(profile, ['名前', 'name'])}`
+      : '',
+    getStringByKeys(profile, ['自己紹介', 'bio'])
+      ? `bio=${getStringByKeys(profile, ['自己紹介', 'bio'])}`
+      : '',
+    getStringByKeys(profile, ['フォロワー数', 'followers', 'followers_count'])
+      ? `followers=${getStringByKeys(profile, ['フォロワー数', 'followers', 'followers_count'])}`
+      : '',
+    getStringByKeys(profile, ['投稿数', 'posts', 'post_count'])
+      ? `posts=${getStringByKeys(profile, ['投稿数', 'posts', 'post_count'])}`
+      : '',
+    getStringByKeys(profile, ['フォロー済み', 'following', 'is_followed'])
+      ? `followed=${getStringByKeys(profile, ['フォロー済み', 'following', 'is_followed'])}`
+      : '',
+    getStringByKeys(profile, ['配信中', 'is_live'])
+      ? `live=${getStringByKeys(profile, ['配信中', 'is_live'])}`
+      : '',
+    getStringByKeys(profile, ['配信タイトル', 'stream_title'])
+      ? `stream_title=${getStringByKeys(profile, ['配信タイトル', 'stream_title'])}`
+      : '',
+  ].filter(Boolean);
+  const posts = latest
+    .slice(0, 3)
+    .map((post) => getStringByKeys(asRecord(post) ?? {}, ['内容', 'content', 'text']).slice(0, 80))
+    .filter(Boolean);
+  return [...details, posts.length ? `latest=${posts.join(' / ')}` : '']
+    .filter(Boolean)
+    .join(' / ');
+}
+
+function extractAituberBio(value: unknown): string {
+  const root = unwrapDataObject(value);
+  const profile = asRecord(root['プロフィール']) ?? asRecord(root.profile) ?? root;
+  return getStringByKeys(profile, ['自己紹介', 'bio']).slice(0, 200);
+}
+
+async function runWithConcurrency<T>(
+  values: T[],
+  concurrency: number,
+  worker: (value: T) => Promise<void>
+): Promise<void> {
+  let index = 0;
+  const runners = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (index < values.length) {
+      const value = values[index++];
+      await worker(value);
+    }
+  });
+  await Promise.all(runners);
+}
+
+function uniqueCandidates(candidates: ElythPostCandidate[]): ElythPostCandidate[] {
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    if (seen.has(candidate.id)) return false;
+    seen.add(candidate.id);
+    return true;
+  });
+}
+
+function compactJson(value: unknown, maxLength: number): string {
+  if (typeof value === 'string') return value.replace(/\s+/g, ' ').slice(0, maxLength);
+  try {
+    return JSON.stringify(value).replace(/\s+/g, ' ').slice(0, maxLength);
+  } catch {
+    return String(value).slice(0, maxLength);
+  }
+}
+
+function getArrayByKeys(value: unknown, keys: string[]): unknown[] {
+  const record = unwrapDataObject(value);
+  for (const key of keys) {
+    const item = record[key];
+    if (Array.isArray(item)) return item;
+  }
+  return [];
+}
+
+function getStringByKeys(record: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  }
+  return '';
+}
+
+function unwrapDataObject(value: unknown): Record<string, unknown> {
+  const record = asRecord(value);
+  if (!record) return {};
+  const data = asRecord(record.data);
+  return data ?? record;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function extractPostId(result: unknown): string | undefined {

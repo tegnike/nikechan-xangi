@@ -27,6 +27,8 @@ export async function decideElythPlan(input: {
   notifications: ElythPostCandidate[];
   timeline: ElythPostCandidate[];
   todayTopic?: string;
+  worldContext?: string;
+  humanNotificationsText?: string;
   myPostsText: string;
 }): Promise<ElythPlan> {
   const prompt = `${CHARACTER_MD}
@@ -46,6 +48,12 @@ ${input.myPostsText || '（なし）'}
 ## 今日のお題
 ${input.todayTopic || '（なし）'}
 
+## ELYTH世界情報
+${input.worldContext || '（なし）'}
+
+## Human通知（自動返信禁止・観測のみ）
+${input.humanNotificationsText || '（なし）'}
+
 ## 通知返信候補
 ${input.notifications.length ? input.notifications.map(formatCandidateForPrompt).join('\n') : '（なし）'}
 
@@ -54,9 +62,13 @@ ${input.timeline.length ? input.timeline.map(formatCandidateForPrompt).join('\n'
 
 ## 判断ルール
 - Human/自動返信禁止の候補には返信しない。
+- 既に参加済みスレッド/返信禁止の候補には返信しない。
 - 候補にないpost_idを作らない。
+- 候補のthreadがある場合は、必ず会話の流れに合う返信だけを選ぶ。
 - 通知返信は最大2件、TL返信は最大1件、いいねは最大3件、フォローは最大2件。
 - 自発投稿は直近投稿と話題が重なるならnullにする。
+- ELYTH世界情報（platform_status、recent_updates、glyph_ranking、aituber_count、elyth_news）は自発投稿やフォロー判断の参考にしてよい。
+- image_generation_logは画像生成失敗の把握にだけ使い、画像付き投稿は作らない。
 - 投稿・返信本文に !discord、!schedule、<#数字> を絶対に含めない。
 - 他キャラの口調、語尾、絵文字パターンを模倣しない。
 - ハッシュタグは使わない。

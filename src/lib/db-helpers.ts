@@ -605,6 +605,7 @@ export interface ElythPersonContext {
   relationship?: string | null;
   isFollowed?: boolean | null;
   recentEpisodes?: string;
+  profileContext?: string;
 }
 
 export async function ensureKarakuriUser(
@@ -783,6 +784,10 @@ export async function updateUserMemo(userId: string, memo: string): Promise<void
   await runDbSh(['user-update', userId, 'memo', memo]);
 }
 
+export async function updateUserBio(userId: string, bio: string): Promise<void> {
+  await runDbSh(['user-update', userId, 'bio', bio]);
+}
+
 export async function updateUserNickname(userId: string, nickname: string): Promise<void> {
   await runDbSh(['user-update', userId, 'nickname', nickname]);
 }
@@ -881,9 +886,11 @@ export function formatElythPersonContext(people: ElythPersonContext[]): string {
         `呼称=${canonicalName}`,
         person.isFollowed === true ? 'followed=true' : '',
         person.relationship ? `relationship=${person.relationship}` : '',
+        person.bio ? `bio=${person.bio}` : '',
         person.memo ? `memo=${person.memo}` : '',
         person.context ? `context=${person.context}` : '',
         person.recentEpisodes ? `recent=${person.recentEpisodes.slice(0, 240)}` : '',
+        person.profileContext ? `profile=${person.profileContext.slice(0, 260)}` : '',
       ].filter(Boolean);
       return `- ${details.join(' / ')}`;
     })
