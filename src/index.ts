@@ -813,6 +813,29 @@ async function main() {
           return text.replace(new RegExp(`<#${channelId}>`, 'g'), `<#${threadId}>`);
         };
 
+        if (isElythWorkflowPrompt(prompt)) {
+          let reportText = '';
+          await runElythWorkflow({
+            channelId: threadId || channelId,
+            authorName: 'scheduler',
+            messageCreatedAt: new Date().toISOString(),
+            sendReport: async (text: string) => {
+              reportText = text;
+              const sent = (await (channel as { send: (c: string) => Promise<Message> }).send(
+                text
+              )) as Message;
+              return {
+                messageId: sent.id,
+                channelId: sent.channel.id,
+                authorId: sent.author.id,
+                authorName: sent.author.username,
+                createdAt: sent.createdAt.toISOString(),
+              };
+            },
+          });
+          return reportText;
+        }
+
         // プロンプト内の !discord send コマンドを先に直接実行
         const promptCommands = extractDiscordSendFromPrompt(prompt);
         for (const cmd of promptCommands.commands) {
