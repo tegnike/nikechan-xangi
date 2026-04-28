@@ -554,9 +554,15 @@ async function main() {
           const reportChannelId = config.discord.channelReports?.[channelId];
           await runKarakuriWorkflow(prompt, {
             messageId: message.id,
+            channelId: message.channel.id,
+            authorId: message.author.id,
+            authorName: message.author.username,
+            messageCreatedAt: message.createdAt.toISOString(),
             sendReport: async (text: string) => {
-              if (!message.channel || !('send' in message.channel)) return;
-              await (message.channel as { send: (c: string) => Promise<unknown> }).send(text);
+              if (!message.channel || !('send' in message.channel)) return undefined;
+              const sent = (await (
+                message.channel as { send: (c: string) => Promise<Message> }
+              ).send(text)) as Message;
               // レポートチャンネルにも転送
               if (reportChannelId) {
                 const ch = await client.channels.fetch(reportChannelId).catch(() => null);
@@ -564,6 +570,13 @@ async function main() {
                   await (ch as { send: (c: string) => Promise<unknown> }).send(text);
                 }
               }
+              return {
+                messageId: sent.id,
+                channelId: sent.channel.id,
+                authorId: sent.author.id,
+                authorName: sent.author.username,
+                createdAt: sent.createdAt.toISOString(),
+              };
             },
           });
           return;

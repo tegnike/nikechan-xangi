@@ -40,6 +40,7 @@ export async function askKarakuriLLM(
   notification: string,
   emotionText: string,
   memoryText: string,
+  personText: string,
   lastCommand = ''
 ): Promise<KarakuriDecision> {
   const prompt = `${SYSTEM_PROMPT}
@@ -52,6 +53,15 @@ ${emotionText}
 
 ## 直近の記憶（3日分）
 ${memoryText}
+
+## 相手情報と呼称ルール
+${personText}
+
+**呼称は絶対に守ってください。**
+- 相手を名前で呼ぶ場合は、上の「必ず使う呼称」を一字一句そのまま使ってください。
+- 表示名・フルネーム・agent_id・別の敬称に言い換えないでください。
+- 「必ず使う呼称」に敬称が含まれている場合も、さらに「さん」「ちゃん」「様」などを足さないでください。
+- 呼称に自信がない場合は、名前を呼ばずに返答してください。
 
 ## 感情変動の参考値（PADモデル）
 - 移動・探索: dP=+0.05, dA=+0.1（好奇心）
@@ -113,6 +123,45 @@ ${raw}
   throw new Error(
     `LLM JSON parse failed after retry. raw=${raw.slice(0, 200)} fixed=${fixed.slice(0, 200)}`
   );
+}
+
+export async function decideKarakuriNickname(input: {
+  name: string;
+  displayName: string;
+  bio?: string | null;
+  relationship?: string | null;
+  episodes?: string;
+}): Promise<string> {
+  const prompt = `以下の情報から、この人物のニックネーム（呼び方）を1つ決めてください。
+
+ルール:
+- デフォルトは「〇〇さん」形式（例: 鈴木 → 鈴木さん、lily → リリーさん）
+- 英語・アルファベット名の人は読みやすいカタカナに変換する（例: VORZEN → ヴォーゼンさん、stocktrading0 → ストックさん、darche2 → ダルシェさん）
+- エピソードの中で会話を通じて決まった呼び方があれば、それを最優先で採用する
+- 「さん」付けが基本。親しい関係（fan/friend）でも「さん」でよい
+- 短く呼びやすいものにする。長い名前は適度に省略する
+- エピソードがなくても name / display_name / bio から判断してよい
+
+人物: ${input.name}
+表示名: ${input.displayName}
+bio: ${input.bio || '（なし）'}
+relationship: ${input.relationship || 'acquaintance'}
+
+エピソード（あれば）:
+${input.episodes || '（なし）'}
+
+出力: ニックネームのみ（例: リリーさん）`;
+
+  const raw = await runClaude(prompt);
+  return sanitizeNickname(raw);
+}
+
+function sanitizeNickname(raw: string): string {
+  return raw
+    .split('\n')[0]
+    .replace(/^["「『`]+|["」』`]+$/g, '')
+    .trim()
+    .slice(0, 40);
 }
 
 function guardInfoLoop(decision: KarakuriDecision, lastCommand: string): KarakuriDecision {
