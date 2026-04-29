@@ -1667,14 +1667,17 @@ function fallbackMentionDecision(message: string): {
 } {
   const clean = normalizeDecisionText(message);
   const numbers = [...clean.matchAll(/[1-9]/g)].map((match) => `m${match[0]}`);
-  if (/^(却下|見送り|やめて|だめ|ダメ|no|ng|stop|キャンセル|全部なし|全てなし)$/i.test(clean)) {
+  if (
+    /^(却下|見送り|スキップ|skip|未対応|反応しない|やめて|だめ|ダメ|no|ng|stop|キャンセル|全部なし|全てなし)$/i.test(
+      clean
+    ) ||
+    /(見送り|スキップ|skip|未対応|反応しない|全部なし|全てなし)(?:で|です|します|して|してください|だって)?$/i.test(
+      clean
+    )
+  ) {
     return { action: 'cancel' as const };
   }
-  if (
-    isApproval(clean) ||
-    /未対応|スキップ|反応しない|そのままでOK|全部OK/i.test(message) ||
-    numbers.length
-  ) {
+  if (isApproval(clean) || /そのままでOK|全部OK/i.test(message) || numbers.length) {
     return {
       action: 'execute' as const,
       selectedItemIds: numbers.length ? [...new Set(numbers)] : undefined,
@@ -1707,7 +1710,11 @@ function isApproval(text: string): boolean {
 
 function isRejection(text: string): boolean {
   const clean = normalizeDecisionText(text);
-  return /^(却下|見送り|やめて|だめ|ダメ|no|ng|stop|キャンセル)$/i.test(clean);
+  return (
+    /^(却下|見送り|スキップ|skip|やめて|だめ|ダメ|no|ng|stop|キャンセル|投稿しない|投稿しないで)$/i.test(
+      clean
+    ) || /(見送り|スキップ|skip)(?:で|です|します|して|してください|だって)?$/i.test(clean)
+  );
 }
 
 function normalizeDecisionText(text: string): string {
