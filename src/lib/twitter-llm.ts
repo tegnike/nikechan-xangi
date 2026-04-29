@@ -1171,18 +1171,35 @@ interface ClaudeJsonResponse {
   is_error?: boolean;
 }
 
-function runClaude(
+async function runClaude(
   prompt: string,
   sessionId?: string
 ): Promise<{ text: string; sessionId?: string }> {
   const modelArgs = process.env.AGENT_MODEL ? ['--model', process.env.AGENT_MODEL] : [];
-  return runClaudeWithArgs(prompt, modelArgs, sessionId).catch((error) => {
-    if (!modelArgs.length) throw error;
-    console.warn(
-      `[twitter] claude failed with AGENT_MODEL=${process.env.AGENT_MODEL}, retrying default model`
-    );
-    return runClaudeWithArgs(prompt, [], sessionId);
-  });
+  const attempts = modelArgs.length
+    ? [
+        { label: `AGENT_MODEL=${process.env.AGENT_MODEL}`, args: modelArgs },
+        { label: `AGENT_MODEL=${process.env.AGENT_MODEL} retry`, args: modelArgs },
+        { label: 'default model fallback', args: [] },
+      ]
+    : [
+        { label: 'default model', args: [] },
+        { label: 'default model retry', args: [] },
+      ];
+
+  let lastError: unknown;
+  for (let i = 0; i < attempts.length; i += 1) {
+    const attempt = attempts[i];
+    try {
+      return await runClaudeWithArgs(prompt, attempt.args, sessionId);
+    } catch (error) {
+      lastError = error;
+      console.warn(`[twitter] claude attempt failed (${attempt.label}): ${formatError(error)}`);
+      if (i < attempts.length - 1) await delay(800 * (i + 1));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 function runClaudeWithArgs(
@@ -1209,8 +1226,10 @@ function runClaudeWithArgs(
       stderr += d.toString();
     });
     proc.on('close', (code: number) => {
-      if (code !== 0) reject(new Error(`claude failed (${code}): ${stderr.trim()}`));
-      else {
+      if (code !== 0) {
+        const detail = stderr.trim() || stdout.trim().slice(0, 500) || 'no stderr/stdout';
+        reject(new Error(`claude failed (${code}): ${detail}`));
+      } else {
         try {
           const parsed = JSON.parse(stdout.trim()) as ClaudeJsonResponse;
           if (parsed.is_error) reject(new Error(`claude returned error: ${parsed.result}`));
@@ -1222,4 +1241,12 @@ function runClaudeWithArgs(
     });
     proc.on('error', reject);
   });
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
