@@ -99,6 +99,49 @@ function buildDiscordReportSender(
   };
 }
 
+type WorkflowPhase = 'thinking' | 'tool_use' | 'text';
+
+function createWorkflowReactionReporter(message: Message): {
+  setPhase: (phase: WorkflowPhase) => Promise<void>;
+  clear: () => Promise<void>;
+} {
+  const phaseEmojis: Record<WorkflowPhase, string> = {
+    thinking: '🧠',
+    tool_use: '🔧',
+    text: '✍️',
+  };
+  let started = false;
+  let currentPhaseEmoji: string | null = null;
+
+  const removeReaction = async (emoji: string) => {
+    await message.reactions.cache
+      .find((r) => r.emoji.name === emoji)
+      ?.users.remove(message.client.user?.id)
+      .catch(() => {});
+  };
+
+  return {
+    setPhase: async (phase: WorkflowPhase) => {
+      const emoji = phaseEmojis[phase];
+      if (!started) {
+        started = true;
+        await message.react('👀').catch(() => {});
+      }
+      if (emoji === currentPhaseEmoji) return;
+      if (currentPhaseEmoji) await removeReaction(currentPhaseEmoji);
+      currentPhaseEmoji = emoji;
+      await message.react(emoji).catch(() => {});
+    },
+    clear: async () => {
+      for (const emoji of ['👀', '🧠', '🔧', '✍️']) {
+        await removeReaction(emoji);
+      }
+      started = false;
+      currentPhaseEmoji = null;
+    },
+  };
+}
+
 async function main() {
   const config = loadConfig();
 
@@ -600,60 +643,83 @@ async function main() {
           message,
           config.discord.channelReports?.[channelId]
         );
+        const workflowReactions = createWorkflowReactionReporter(message);
+        const withWorkflowReactions = async <T>(fn: () => Promise<T>): Promise<T> => {
+          try {
+            return await fn();
+          } finally {
+            await workflowReactions.clear();
+          }
+        };
 
-        const handledSelfTweetApproval = await handleSelfTweetApproval(prompt, {
-          messageId: message.id,
-          channelId: message.channel.id,
-          authorId: message.author.id,
-          authorName: message.author.username,
-          messageCreatedAt: message.createdAt.toISOString(),
-          sendReport: sendWorkflowReport,
-        });
-        if (handledSelfTweetApproval) return;
-
-        const handledMentionReactionApproval = await handleMentionReactionApproval(prompt, {
-          messageId: message.id,
-          channelId: message.channel.id,
-          authorId: message.author.id,
-          authorName: message.author.username,
-          messageCreatedAt: message.createdAt.toISOString(),
-          sendReport: sendWorkflowReport,
-        });
-        if (handledMentionReactionApproval) return;
-
-        if (isSelfTweetWorkflowPrompt(prompt)) {
-          await runSelfTweetWorkflow({
+        const handledSelfTweetApproval = await withWorkflowReactions(() =>
+          handleSelfTweetApproval(prompt, {
             messageId: message.id,
             channelId: message.channel.id,
             authorId: message.author.id,
             authorName: message.author.username,
             messageCreatedAt: message.createdAt.toISOString(),
             sendReport: sendWorkflowReport,
-          });
+            setPhase: workflowReactions.setPhase,
+          })
+        );
+        if (handledSelfTweetApproval) return;
+
+        const handledMentionReactionApproval = await withWorkflowReactions(() =>
+          handleMentionReactionApproval(prompt, {
+            messageId: message.id,
+            channelId: message.channel.id,
+            authorId: message.author.id,
+            authorName: message.author.username,
+            messageCreatedAt: message.createdAt.toISOString(),
+            sendReport: sendWorkflowReport,
+            setPhase: workflowReactions.setPhase,
+          })
+        );
+        if (handledMentionReactionApproval) return;
+
+        if (isSelfTweetWorkflowPrompt(prompt)) {
+          await withWorkflowReactions(() =>
+            runSelfTweetWorkflow({
+              messageId: message.id,
+              channelId: message.channel.id,
+              authorId: message.author.id,
+              authorName: message.author.username,
+              messageCreatedAt: message.createdAt.toISOString(),
+              sendReport: sendWorkflowReport,
+              setPhase: workflowReactions.setPhase,
+            })
+          );
           return;
         }
 
         if (isMentionReactionWorkflowPrompt(prompt)) {
-          await runMentionReactionWorkflow({
-            messageId: message.id,
-            channelId: message.channel.id,
-            authorId: message.author.id,
-            authorName: message.author.username,
-            messageCreatedAt: message.createdAt.toISOString(),
-            sendReport: sendWorkflowReport,
-          });
+          await withWorkflowReactions(() =>
+            runMentionReactionWorkflow({
+              messageId: message.id,
+              channelId: message.channel.id,
+              authorId: message.author.id,
+              authorName: message.author.username,
+              messageCreatedAt: message.createdAt.toISOString(),
+              sendReport: sendWorkflowReport,
+              setPhase: workflowReactions.setPhase,
+            })
+          );
           return;
         }
 
         if (isHashtagReactionWorkflowPrompt(prompt)) {
-          await runHashtagReactionWorkflow({
-            messageId: message.id,
-            channelId: message.channel.id,
-            authorId: message.author.id,
-            authorName: message.author.username,
-            messageCreatedAt: message.createdAt.toISOString(),
-            sendReport: sendWorkflowReport,
-          });
+          await withWorkflowReactions(() =>
+            runHashtagReactionWorkflow({
+              messageId: message.id,
+              channelId: message.channel.id,
+              authorId: message.author.id,
+              authorName: message.author.username,
+              messageCreatedAt: message.createdAt.toISOString(),
+              sendReport: sendWorkflowReport,
+              setPhase: workflowReactions.setPhase,
+            })
+          );
           return;
         }
 

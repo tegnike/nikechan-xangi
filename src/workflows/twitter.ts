@@ -41,6 +41,7 @@ export interface TwitterSentReport {
 
 export interface TwitterWorkflowOptions {
   sendReport: (text: string) => Promise<TwitterSentReport | void>;
+  setPhase?: (phase: 'thinking' | 'tool_use' | 'text') => Promise<void> | void;
   messageId?: string;
   channelId?: string;
   authorId?: string;
@@ -105,6 +106,7 @@ export async function runSelfTweetWorkflow(opts: TwitterWorkflowOptions): Promis
     : `twitter:self-tweet:${Date.now()}`;
 
   try {
+    await opts.setPhase?.('thinking');
     const pending = await createPendingSelfTweet(channelId, 0);
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
@@ -186,6 +188,7 @@ export async function runSelfTweetWorkflow(opts: TwitterWorkflowOptions): Promis
       source_types: pending.sourceCollection.candidates.map((candidate) => candidate.sourceType),
       draft_count: pending.drafts.length,
     });
+    await opts.setPhase?.('text');
     await opts.sendReport(formatApprovalRequest(pending));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -197,6 +200,7 @@ export async function runSelfTweetWorkflow(opts: TwitterWorkflowOptions): Promis
       raw_content: message,
       parsed: { error: message },
     });
+    await opts.setPhase?.('text');
     await opts.sendReport(`⚠️ 自発ツイートワークフロー失敗: ${message.slice(0, 300)}`);
   }
 }
@@ -215,6 +219,7 @@ export async function handleSelfTweetApproval(
   const normalized = prompt.trim();
   if (!normalized || normalized.startsWith('/')) return false;
 
+  await opts.setPhase?.('thinking');
   const decision = await interpretMasterSelfTweetReply({
     message: normalized,
     pending: {
@@ -250,6 +255,7 @@ export async function handleSelfTweetApproval(
 
   if (decision.action === 'post') {
     const draft = selectDraft(pending, decision.selectedDraftId);
+    await opts.setPhase?.('tool_use');
     await publishSelectedSelfTweet(draft, opts);
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
@@ -286,11 +292,13 @@ export async function handleSelfTweetApproval(
       at: new Date().toISOString(),
       message: normalized,
     });
+    await opts.setPhase?.('text');
     await opts.sendReport('了解です。今回は見送ります。');
     return true;
   }
 
   try {
+    await opts.setPhase?.('thinking');
     const revised = await revisePendingFromMaster(pending, decision.instruction || normalized);
     await savePendingSelfTweet(channelId, revised);
     await addTwitterActivityLog({
@@ -304,10 +312,12 @@ export async function handleSelfTweetApproval(
         drafts: revised.drafts,
       },
     });
+    await opts.setPhase?.('text');
     await opts.sendReport(formatApprovalRequest(revised, true));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[twitter] self-tweet revision failed:', err);
+    await opts.setPhase?.('text');
     await opts.sendReport(`⚠️ 修正版の生成に失敗しました: ${message.slice(0, 250)}`);
   }
 
@@ -322,8 +332,10 @@ export async function runMentionReactionWorkflow(opts: TwitterWorkflowOptions): 
     : `twitter:mention-reaction:${Date.now()}`;
 
   try {
+    await opts.setPhase?.('thinking');
     const pending = await createPendingMentionReaction(channelId, 0);
     if (!pending) {
+      await opts.setPhase?.('text');
       await opts.sendReport('未チェックのリプライ/引用RT/メンションはありませんでした。');
       await addTwitterActivityLog({
         ...activityMeta(opts, runKey),
@@ -388,6 +400,7 @@ export async function runMentionReactionWorkflow(opts: TwitterWorkflowOptions): 
       raw_content: pending.items.map((item) => mentionItemTextForLog(item)).join('\n---\n'),
       parsed: { item_ids: pending.items.map((item) => item.id) },
     });
+    await opts.setPhase?.('text');
     await opts.sendReport(formatMentionApprovalRequest(pending));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -399,6 +412,7 @@ export async function runMentionReactionWorkflow(opts: TwitterWorkflowOptions): 
       raw_content: message,
       parsed: { error: message },
     });
+    await opts.setPhase?.('text');
     await opts.sendReport(`⚠️ メンション反応ワークフロー失敗: ${message.slice(0, 300)}`);
   }
 }
@@ -417,6 +431,7 @@ export async function handleMentionReactionApproval(
   const normalized = prompt.trim();
   if (!normalized || normalized.startsWith('/')) return false;
 
+  await opts.setPhase?.('thinking');
   const decision = await interpretMasterMentionReactionReply({
     message: normalized,
     pending: {
@@ -451,6 +466,7 @@ export async function handleMentionReactionApproval(
 
   if (decision.action === 'execute') {
     const items = selectMentionItems(pending, decision.selectedItemIds);
+    await opts.setPhase?.('tool_use');
     const result = await executeMentionReactions(items, pending, opts);
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
@@ -481,11 +497,13 @@ export async function handleMentionReactionApproval(
       at: new Date().toISOString(),
       message: normalized,
     });
+    await opts.setPhase?.('text');
     await opts.sendReport('了解です。今回は見送ります。');
     return true;
   }
 
   try {
+    await opts.setPhase?.('thinking');
     const revised = await revisePendingMentionFromMaster(
       pending,
       decision.instruction || normalized
@@ -502,10 +520,12 @@ export async function handleMentionReactionApproval(
         items: revised.items,
       },
     });
+    await opts.setPhase?.('text');
     await opts.sendReport(formatMentionApprovalRequest(revised, true));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[twitter] mention-reaction revision failed:', err);
+    await opts.setPhase?.('text');
     await opts.sendReport(`⚠️ 修正版の生成に失敗しました: ${message.slice(0, 250)}`);
   }
 
@@ -520,11 +540,13 @@ export async function runHashtagReactionWorkflow(opts: TwitterWorkflowOptions): 
     : `twitter:hashtag-reaction:${Date.now()}`;
 
   try {
+    await opts.setPhase?.('thinking');
     const [emotion, candidates] = await Promise.all([
       getEmotion(),
       collectHashtagReactionCandidates(),
     ]);
     if (!candidates.length) {
+      await opts.setPhase?.('text');
       await opts.sendReport('未チェックのハッシュタグツイートはありませんでした。');
       await addTwitterActivityLog({
         ...activityMeta(opts, runKey),
@@ -563,7 +585,9 @@ export async function runHashtagReactionWorkflow(opts: TwitterWorkflowOptions): 
       parsed: { checked_tweet_log_ids: candidates.map((candidate) => candidate.tweetLogId) },
     });
 
+    await opts.setPhase?.('tool_use');
     const result = await executeHashtagReactions(items, candidates, opts);
+    await opts.setPhase?.('text');
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
       workflow: 'hashtag-reaction',
@@ -581,6 +605,7 @@ export async function runHashtagReactionWorkflow(opts: TwitterWorkflowOptions): 
       raw_content: message,
       parsed: { error: message },
     });
+    await opts.setPhase?.('text');
     await opts.sendReport(`⚠️ ハッシュタグ反応ワークフロー失敗: ${message.slice(0, 300)}`);
   }
 }
@@ -1118,6 +1143,7 @@ async function executeMentionReactions(
   const urls = results
     .flatMap((result) => [result.reply_url, result.quote_url].filter(Boolean))
     .join('\n');
+  await opts.setPhase?.('text');
   await opts.sendReport(`メンション反応を処理しました。\n${summary}${urls ? `\n\n${urls}` : ''}`);
   return { summary, results };
 }
@@ -1227,6 +1253,7 @@ async function executeHashtagReactions(
   }
 
   const summary = `${items.length}件チェック: RT${retweetCount}件、スキップ${skipCount}件`;
+  await opts.setPhase?.('text');
   await opts.sendReport(formatHashtagReport(items, results));
   return { summary, results };
 }
@@ -1515,6 +1542,7 @@ async function publishSelectedSelfTweet(
 ): Promise<void> {
   const text = draft.mechanicalCheck.checkedText || draft.text;
   if (isTwitterWorkflowDryRun()) {
+    await opts.setPhase?.('text');
     await opts.sendReport(
       `TWITTER_WORKFLOW_DRY_RUN=true のため投稿は実行しません。\n\n予定本文:\n「${text}」`
     );
@@ -1529,6 +1557,7 @@ async function publishSelectedSelfTweet(
   await recordEmotionShift(0.05, 0.05, 0, 'self-tweet', 'ツイート投稿成功', draft.topic).catch(
     (e) => console.error('[twitter] emotion-shift failed:', e)
   );
+  await opts.setPhase?.('text');
   await opts.sendReport(`投稿しました。\n${result || '（投稿結果のURL取得なし）'}`);
 }
 
