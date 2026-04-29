@@ -219,22 +219,9 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
 
 async function collectRawSelfPostSourceData(): Promise<string> {
   const today = new Date().toISOString().slice(0, 10);
-  const [episodes, tasks, notes] = await Promise.all([
-    safeDb(['ep-list', today]),
-    safeDb(['task-list', 'in_progress']),
-    safeDb(['note-list']),
-  ]);
+  const episodes = await safeDb(['ep-list', today]);
 
-  return [
-    '## 今日のエピソード',
-    truncateBlock(episodes, 1600),
-    '',
-    '## 進行中タスク',
-    truncateBlock(tasks, 1200),
-    '',
-    '## 最近のノート',
-    truncateBlock(notes, 1200),
-  ].join('\n');
+  return ['## 今日のエピソード', truncateBlock(episodes, 1600)].join('\n');
 }
 
 async function safeDb(args: string[]): Promise<string> {
