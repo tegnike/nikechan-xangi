@@ -77,9 +77,16 @@ interface PendingMentionReaction {
   checkedTweetLogIds: string[];
 }
 
+interface ClosedWorkflowChannel {
+  closedAt: string;
+  reason: 'executed' | 'cancelled' | 'manual';
+}
+
 interface TwitterWorkflowState {
   pendingSelfTweets: Record<string, PendingSelfTweet>;
   pendingMentionReactions: Record<string, PendingMentionReaction>;
+  closedSelfTweets: Record<string, ClosedWorkflowChannel>;
+  closedMentionReactions: Record<string, ClosedWorkflowChannel>;
 }
 
 export function isSelfTweetWorkflowPrompt(prompt: string): boolean {
@@ -213,7 +220,9 @@ export async function handleSelfTweetApproval(
   if (!channelId) return false;
 
   const pending = await getPendingSelfTweet(channelId);
-  if (!pending) return false;
+  if (!pending) {
+    return handleClosedSelfTweetApproval(prompt, opts);
+  }
   const runKey = `twitter:self-tweet:${channelId}`;
 
   const normalized = prompt.trim();
@@ -273,7 +282,7 @@ export async function handleSelfTweetApproval(
         topic: draft.topic,
       },
     });
-    await clearPendingSelfTweet(channelId);
+    await clearPendingSelfTweet(channelId, 'executed');
     await setTwitterRunState('self_tweet_last_execute', {
       at: new Date().toISOString(),
       selected_draft_id: draft.id,
@@ -291,7 +300,7 @@ export async function handleSelfTweetApproval(
       raw_content: normalized,
       parsed: { drafts: pending.drafts },
     });
-    await clearPendingSelfTweet(channelId);
+    await clearPendingSelfTweet(channelId, 'cancelled');
     await setTwitterRunState('self_tweet_last_cancel', {
       at: new Date().toISOString(),
       message: normalized,
@@ -325,6 +334,23 @@ export async function handleSelfTweetApproval(
     await opts.sendReport(`⚠️ 修正版の生成に失敗しました: ${message.slice(0, 250)}`);
   }
 
+  return true;
+}
+
+async function handleClosedSelfTweetApproval(
+  prompt: string,
+  opts: TwitterWorkflowOptions
+): Promise<boolean> {
+  const channelId = opts.channelId;
+  if (!channelId) return false;
+  const normalized = prompt.trim();
+  if (!normalized || normalized.startsWith('/')) return false;
+
+  const closed = await getClosedSelfTweet(channelId);
+  if (!closed) return false;
+
+  await opts.setPhase?.('text');
+  await opts.sendReport('このスレッドの自発ツイート承認待ちは既に終了しています。');
   return true;
 }
 
@@ -429,7 +455,9 @@ export async function handleMentionReactionApproval(
   if (!channelId) return false;
 
   const pending = await getPendingMentionReaction(channelId);
-  if (!pending) return false;
+  if (!pending) {
+    return handleClosedMentionReactionApproval(prompt, opts);
+  }
   const runKey = `twitter:mention-reaction:${channelId}`;
 
   const normalized = prompt.trim();
@@ -483,7 +511,7 @@ export async function handleMentionReactionApproval(
       raw_content: result.summary,
       parsed: result,
     });
-    await clearPendingMentionReaction(channelId);
+    await clearPendingMentionReaction(channelId, 'executed');
     await setTwitterRunState('mention_reaction_last_execute', {
       at: new Date().toISOString(),
       summary: result.summary,
@@ -500,7 +528,7 @@ export async function handleMentionReactionApproval(
       raw_content: normalized,
       parsed: { items: pending.items },
     });
-    await clearPendingMentionReaction(channelId);
+    await clearPendingMentionReaction(channelId, 'cancelled');
     await setTwitterRunState('mention_reaction_last_cancel', {
       at: new Date().toISOString(),
       message: normalized,
@@ -537,6 +565,23 @@ export async function handleMentionReactionApproval(
     await opts.sendReport(`⚠️ 修正版の生成に失敗しました: ${message.slice(0, 250)}`);
   }
 
+  return true;
+}
+
+async function handleClosedMentionReactionApproval(
+  prompt: string,
+  opts: TwitterWorkflowOptions
+): Promise<boolean> {
+  const channelId = opts.channelId;
+  if (!channelId) return false;
+  const normalized = prompt.trim();
+  if (!normalized || normalized.startsWith('/')) return false;
+
+  const closed = await getClosedMentionReaction(channelId);
+  if (!closed) return false;
+
+  await opts.setPhase?.('text');
+  await opts.sendReport('このスレッドのメンション反応承認待ちは既に終了しています。');
   return true;
 }
 
@@ -2021,12 +2066,25 @@ async function getPendingSelfTweet(channelId: string): Promise<PendingSelfTweet 
 async function savePendingSelfTweet(channelId: string, pending: PendingSelfTweet): Promise<void> {
   const state = await loadState();
   state.pendingSelfTweets[channelId] = pending;
+  delete state.closedSelfTweets[channelId];
   await saveState(state);
 }
 
-async function clearPendingSelfTweet(channelId: string): Promise<void> {
+async function getClosedSelfTweet(channelId: string): Promise<ClosedWorkflowChannel | null> {
+  const state = await loadState();
+  return state.closedSelfTweets[channelId] ?? null;
+}
+
+async function clearPendingSelfTweet(
+  channelId: string,
+  reason: ClosedWorkflowChannel['reason']
+): Promise<void> {
   const state = await loadState();
   delete state.pendingSelfTweets[channelId];
+  state.closedSelfTweets[channelId] = {
+    closedAt: new Date().toISOString(),
+    reason,
+  };
   await saveState(state);
 }
 
@@ -2043,12 +2101,25 @@ async function savePendingMentionReaction(
 ): Promise<void> {
   const state = await loadState();
   state.pendingMentionReactions[channelId] = pending;
+  delete state.closedMentionReactions[channelId];
   await saveState(state);
 }
 
-async function clearPendingMentionReaction(channelId: string): Promise<void> {
+async function getClosedMentionReaction(channelId: string): Promise<ClosedWorkflowChannel | null> {
+  const state = await loadState();
+  return state.closedMentionReactions[channelId] ?? null;
+}
+
+async function clearPendingMentionReaction(
+  channelId: string,
+  reason: ClosedWorkflowChannel['reason']
+): Promise<void> {
   const state = await loadState();
   delete state.pendingMentionReactions[channelId];
+  state.closedMentionReactions[channelId] = {
+    closedAt: new Date().toISOString(),
+    reason,
+  };
   await saveState(state);
 }
 
@@ -2059,9 +2130,16 @@ async function loadState(): Promise<TwitterWorkflowState> {
     return {
       pendingSelfTweets: parsed.pendingSelfTweets ?? {},
       pendingMentionReactions: parsed.pendingMentionReactions ?? {},
+      closedSelfTweets: parsed.closedSelfTweets ?? {},
+      closedMentionReactions: parsed.closedMentionReactions ?? {},
     };
   } catch {
-    return { pendingSelfTweets: {}, pendingMentionReactions: {} };
+    return {
+      pendingSelfTweets: {},
+      pendingMentionReactions: {},
+      closedSelfTweets: {},
+      closedMentionReactions: {},
+    };
   }
 }
 
