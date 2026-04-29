@@ -48,6 +48,11 @@ import {
 import { runKarakuriWorkflow } from './workflows/karakuri.js';
 import { runElythWorkflow } from './workflows/elyth.js';
 import {
+  handleSelfTweetApproval,
+  isSelfTweetWorkflowPrompt,
+  runSelfTweetWorkflow,
+} from './workflows/twitter.js';
+import {
   handleScheduleCommand,
   handleScheduleMessage,
   executeScheduleFromResponse,
@@ -55,6 +60,38 @@ import {
 
 function isElythWorkflowPrompt(prompt: string): boolean {
   return /^\/elyth-activity(?:\s|（|\(|$)/.test(prompt.trim());
+}
+
+function buildDiscordReportSender(
+  client: Client,
+  message: Message,
+  reportChannelId?: string
+): (text: string) => Promise<{
+  messageId?: string;
+  channelId?: string;
+  authorId?: string;
+  authorName?: string;
+  createdAt?: string;
+}> {
+  return async (text: string) => {
+    if (!message.channel || !('send' in message.channel)) return {};
+    const sent = (await (message.channel as { send: (c: string) => Promise<Message> }).send(
+      text
+    )) as Message;
+    if (reportChannelId) {
+      const ch = await client.channels.fetch(reportChannelId).catch(() => null);
+      if (ch && 'send' in ch) {
+        await (ch as { send: (c: string) => Promise<unknown> }).send(text);
+      }
+    }
+    return {
+      messageId: sent.id,
+      channelId: sent.channel.id,
+      authorId: sent.author.id,
+      authorName: sent.author.username,
+      createdAt: sent.createdAt.toISOString(),
+    };
+  };
 }
 
 async function main() {
@@ -553,6 +590,33 @@ async function main() {
       try {
         // チャンネルに紐づくスキルのSKILL.mdを前置注入
         const channelSkillName = config.discord.channelSkills?.[channelId];
+        const sendWorkflowReport = buildDiscordReportSender(
+          client,
+          message,
+          config.discord.channelReports?.[channelId]
+        );
+
+        const handledSelfTweetApproval = await handleSelfTweetApproval(prompt, {
+          messageId: message.id,
+          channelId: message.channel.id,
+          authorId: message.author.id,
+          authorName: message.author.username,
+          messageCreatedAt: message.createdAt.toISOString(),
+          sendReport: sendWorkflowReport,
+        });
+        if (handledSelfTweetApproval) return;
+
+        if (isSelfTweetWorkflowPrompt(prompt)) {
+          await runSelfTweetWorkflow({
+            messageId: message.id,
+            channelId: message.channel.id,
+            authorId: message.author.id,
+            authorName: message.author.username,
+            messageCreatedAt: message.createdAt.toISOString(),
+            sendReport: sendWorkflowReport,
+          });
+          return;
+        }
 
         if (isElythWorkflowPrompt(prompt)) {
           await runElythWorkflow({
@@ -561,59 +625,20 @@ async function main() {
             authorId: message.author.id,
             authorName: message.author.username,
             messageCreatedAt: message.createdAt.toISOString(),
-            sendReport: async (text: string) => {
-              if (!message.channel || !('send' in message.channel)) return undefined;
-              const sent = (await (
-                message.channel as { send: (c: string) => Promise<Message> }
-              ).send(text)) as Message;
-              const reportChannelId = config.discord.channelReports?.[channelId];
-              if (reportChannelId) {
-                const ch = await client.channels.fetch(reportChannelId).catch(() => null);
-                if (ch && 'send' in ch) {
-                  await (ch as { send: (c: string) => Promise<unknown> }).send(text);
-                }
-              }
-              return {
-                messageId: sent.id,
-                channelId: sent.channel.id,
-                authorId: sent.author.id,
-                authorName: sent.author.username,
-                createdAt: sent.createdAt.toISOString(),
-              };
-            },
+            sendReport: sendWorkflowReport,
           });
           return;
         }
 
         // karakuri-worldチャンネルはワークフローで処理（LLMセッションを使わない）
         if (channelSkillName === 'karakuri-world') {
-          const reportChannelId = config.discord.channelReports?.[channelId];
           await runKarakuriWorkflow(prompt, {
             messageId: message.id,
             channelId: message.channel.id,
             authorId: message.author.id,
             authorName: message.author.username,
             messageCreatedAt: message.createdAt.toISOString(),
-            sendReport: async (text: string) => {
-              if (!message.channel || !('send' in message.channel)) return undefined;
-              const sent = (await (
-                message.channel as { send: (c: string) => Promise<Message> }
-              ).send(text)) as Message;
-              // レポートチャンネルにも転送
-              if (reportChannelId) {
-                const ch = await client.channels.fetch(reportChannelId).catch(() => null);
-                if (ch && 'send' in ch) {
-                  await (ch as { send: (c: string) => Promise<unknown> }).send(text);
-                }
-              }
-              return {
-                messageId: sent.id,
-                channelId: sent.channel.id,
-                authorId: sent.author.id,
-                authorName: sent.author.username,
-                createdAt: sent.createdAt.toISOString(),
-              };
-            },
+            sendReport: sendWorkflowReport,
           });
           return;
         }
@@ -812,6 +837,29 @@ async function main() {
           if (!threadId) return text;
           return text.replace(new RegExp(`<#${channelId}>`, 'g'), `<#${threadId}>`);
         };
+
+        if (isSelfTweetWorkflowPrompt(prompt)) {
+          let reportText = '';
+          await runSelfTweetWorkflow({
+            channelId: threadId || channelId,
+            authorName: 'scheduler',
+            messageCreatedAt: new Date().toISOString(),
+            sendReport: async (text: string) => {
+              reportText = text;
+              const sent = (await (channel as { send: (c: string) => Promise<Message> }).send(
+                text
+              )) as Message;
+              return {
+                messageId: sent.id,
+                channelId: sent.channel.id,
+                authorId: sent.author.id,
+                authorName: sent.author.username,
+                createdAt: sent.createdAt.toISOString(),
+              };
+            },
+          });
+          return reportText;
+        }
 
         if (isElythWorkflowPrompt(prompt)) {
           let reportText = '';
