@@ -390,10 +390,6 @@ export async function interpretMasterSelfTweetReply(input: {
     revisionCount: number;
   };
 }): Promise<MasterSelfTweetDecision> {
-  if (isExplicitSelfTweetCancel(input.message)) {
-    return { action: 'cancel' };
-  }
-
   const prompt = `あなたはAIニケちゃんのself-tweet承認フロー制御担当です。
 マスターの返信を読み、投稿・修正・却下のどれかに分類してください。
 1-6までの文脈を保持するため、候補一覧とsource-collector結果を必ず参照します。
@@ -414,7 +410,8 @@ ${input.pending.revisionCount}
 - 「1」「2番」「これ」「OK」「どうぞ」など、投稿対象が明確なら action=post。
 - 「1で良い」「3案で」「これで投稿」「このまま」など、マスターが承認している場合は即投稿する。承認後に再提示しない。
 - 番号指定なしのOKは、最初の候補を選ぶ。
-- 明確に「却下」「見送り」「スキップ」「やめて」「キャンセル」「NG」「投稿しない」と言っている場合だけ action=cancel。
+- 明確に「却下」「見送り」「スキップ」「今回はなし」「やめて」「キャンセル」「NG」「投稿しない」と言っている場合は action=cancel。
+- 「全体的に分かりづらいのでスキップ」「スキップだって」「今回は見送り」「今回はやめておく」「投稿しなくていい」は修正指示ではなく action=cancel。
 - 「微妙」「全体的に違う」「もっと良くして」などの否定的評価は見送りではなく action=revise。マスターが見送るかどうかを判断するので、曖昧な不満で候補を脱落させない。
 - 文体修正、内容追加、別案希望、混ぜて、短く等、マスターが本文変更を求めている場合だけ action=revise。revise後は再提示して、次のマスター返信を待つ。
 - revise の場合、instruction にマスターの意図と保持すべき文脈を具体的に書く。
@@ -435,28 +432,14 @@ JSONだけを返してください。Markdownは禁止です。
     decision?.action === 'post' || decision?.action === 'cancel' || decision?.action === 'revise'
       ? decision.action
       : 'revise';
-  const safeAction =
-    action === 'cancel' && !isExplicitSelfTweetCancel(input.message) ? 'revise' : action;
   return {
-    action: safeAction,
+    action,
     selectedDraftId:
       typeof decision?.selectedDraftId === 'string' ? decision.selectedDraftId : undefined,
     instruction: typeof decision?.instruction === 'string' ? decision.instruction : input.message,
     feedbackForFuture:
       typeof decision?.feedbackForFuture === 'string' ? decision.feedbackForFuture : undefined,
   };
-}
-
-export function isExplicitSelfTweetCancel(message: string): boolean {
-  const normalized = message.replace(/[。、.!！?？\s]/g, '').trim();
-  if (/スキップしない|見送らない|キャンセルしない|投稿して|投稿する|ok|承認/i.test(normalized)) {
-    return false;
-  }
-  return (
-    /^(却下|見送り|スキップ|skip|やめて|だめ|ダメ|no|ng|stop|キャンセル|投稿しない|投稿しないで)$/i.test(
-      normalized
-    ) || /(見送り|スキップ|skip)(?:で|です|します|して|してください|だって)?$/i.test(normalized)
-  );
 }
 
 export async function reviseSelfTweetDraftsFromMaster(input: {
@@ -698,10 +681,6 @@ export async function interpretMasterMentionReactionReply(input: {
     revisionCount: number;
   };
 }): Promise<MasterMentionReactionDecision> {
-  if (isExplicitMentionCancel(input.message)) {
-    return { action: 'cancel' };
-  }
-
   const prompt = `あなたはAIニケちゃんのmention-reaction承認フロー制御担当です。
 マスターの返信を読み、投稿実行・修正・却下のどれかに分類してください。
 
@@ -719,7 +698,8 @@ ${input.pending.revisionCount}
 - 「1だけ」「2と4」など番号指定があれば selectedItemIds に m1, m2 のように入れる。
 - 「1で良い」「3案で」「このまま」「それで」など、マスターが承認している場合は即実行する。承認後に再提示しない。
 - 全体に対して「未対応」「スキップ」「反応しない」「全部なし」と言っている場合は action=cancel。
-- 明確に「却下」「見送り」「やめて」「キャンセル」と言っている場合だけ action=cancel。
+- 明確に「却下」「見送り」「今回はなし」「やめて」「キャンセル」と言っている場合は action=cancel。
+- 「スキップしないでリプして」「2はスキップ、1はリプ」のように個別の実行内容を指定している場合は action=execute または action=revise として文脈から判断する。
 - 文体修正、個別修正、別案希望、短く、もっと柔らかく等、マスターが本文変更を求めている場合だけ action=revise。revise後は再提示して、次のマスター返信を待つ。
 - revise の場合、instruction にマスターの意図と対象候補を具体的に書く。
 - 今後も適用すべき口調・人物別対応・判断ルールが含まれていれば feedbackForFuture に短く書く。
@@ -739,10 +719,8 @@ JSONだけを返してください。Markdownは禁止です。
     decision?.action === 'execute' || decision?.action === 'cancel' || decision?.action === 'revise'
       ? decision.action
       : 'revise';
-  const safeAction =
-    action === 'cancel' && !isExplicitMentionCancel(input.message) ? 'revise' : action;
   return {
-    action: safeAction,
+    action,
     selectedItemIds: Array.isArray(decision?.selectedItemIds)
       ? decision.selectedItemIds.map(String)
       : undefined,
@@ -750,25 +728,6 @@ JSONだけを返してください。Markdownは禁止です。
     feedbackForFuture:
       typeof decision?.feedbackForFuture === 'string' ? decision.feedbackForFuture : undefined,
   };
-}
-
-export function isExplicitMentionCancel(message: string): boolean {
-  const normalized = message.replace(/[。、.!！?？\s]/g, '').trim();
-  if (
-    /スキップしない|見送らない|キャンセルしない|返信して|リプして|引用して|ok|承認/i.test(
-      normalized
-    )
-  ) {
-    return false;
-  }
-  return (
-    /^(却下|見送り|スキップ|skip|未対応|反応しない|やめて|だめ|ダメ|no|ng|stop|キャンセル|全部なし|全てなし)$/i.test(
-      normalized
-    ) ||
-    /(見送り|スキップ|skip|未対応|反応しない|全部なし|全てなし)(?:で|です|します|して|してください|だって)?$/i.test(
-      normalized
-    )
-  );
 }
 
 export async function reviseMentionReactionPlanFromMaster(input: {

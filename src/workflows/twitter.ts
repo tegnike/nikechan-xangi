@@ -227,10 +227,14 @@ export async function handleSelfTweetApproval(
       drafts: pending.drafts,
       revisionCount: pending.revisionCount,
     },
-  }).catch((err) => {
+  }).catch(async (err) => {
     console.error('[twitter] master reply interpretation failed:', err);
-    return fallbackMasterDecision(normalized);
+    const message = err instanceof Error ? err.message : String(err);
+    await opts.setPhase?.('text');
+    await opts.sendReport(`⚠️ マスター返信の解釈に失敗しました: ${message.slice(0, 250)}`);
+    return null;
   });
+  if (!decision) return true;
   await addTwitterActivityLog({
     ...activityMeta(opts, runKey),
     workflow: 'self-tweet',
@@ -438,10 +442,14 @@ export async function handleMentionReactionApproval(
       items: pending.items,
       revisionCount: pending.revisionCount,
     },
-  }).catch((err) => {
+  }).catch(async (err) => {
     console.error('[twitter] mention reply interpretation failed:', err);
-    return fallbackMentionDecision(normalized);
+    const message = err instanceof Error ? err.message : String(err);
+    await opts.setPhase?.('text');
+    await opts.sendReport(`⚠️ マスター返信の解釈に失敗しました: ${message.slice(0, 250)}`);
+    return null;
   });
+  if (!decision) return true;
   await addTwitterActivityLog({
     ...activityMeta(opts, runKey),
     workflow: 'mention-reaction',
@@ -1657,68 +1665,6 @@ function mentionItemTextForLog(item: MentionReactionItem): string {
 function truncateInline(text: string, max: number): string {
   const oneLine = text.replace(/\s+/g, ' ').trim();
   return oneLine.length > max ? `${oneLine.slice(0, max)}...` : oneLine;
-}
-
-function fallbackMentionDecision(message: string): {
-  action: 'execute' | 'revise' | 'cancel';
-  selectedItemIds?: string[];
-  instruction?: string;
-  feedbackForFuture?: string;
-} {
-  const clean = normalizeDecisionText(message);
-  const numbers = [...clean.matchAll(/[1-9]/g)].map((match) => `m${match[0]}`);
-  if (
-    /^(却下|見送り|スキップ|skip|未対応|反応しない|やめて|だめ|ダメ|no|ng|stop|キャンセル|全部なし|全てなし)$/i.test(
-      clean
-    ) ||
-    /(見送り|スキップ|skip|未対応|反応しない|全部なし|全てなし)(?:で|です|します|して|してください|だって)?$/i.test(
-      clean
-    )
-  ) {
-    return { action: 'cancel' as const };
-  }
-  if (isApproval(clean) || /そのままでOK|全部OK/i.test(message) || numbers.length) {
-    return {
-      action: 'execute' as const,
-      selectedItemIds: numbers.length ? [...new Set(numbers)] : undefined,
-    };
-  }
-  return { action: 'revise' as const, instruction: message };
-}
-
-function fallbackMasterDecision(message: string): {
-  action: 'post' | 'revise' | 'cancel';
-  selectedDraftId?: string;
-  instruction?: string;
-  feedbackForFuture?: string;
-} {
-  const clean = normalizeDecisionText(message);
-  const number = clean.match(/[1-5]/)?.[0];
-  if (isRejection(clean)) return { action: 'cancel' as const };
-  if (isApproval(clean) || number) {
-    return { action: 'post' as const, selectedDraftId: number ? `d${number}` : undefined };
-  }
-  return { action: 'revise' as const, instruction: message };
-}
-
-function isApproval(text: string): boolean {
-  const clean = normalizeDecisionText(text);
-  return /^(ok|okです|okay|承認|投稿して|投稿していい|投稿していいです|お願いします|いいよ|よいです|良いです|どうぞ|go|yes|👍)$/i.test(
-    clean
-  );
-}
-
-function isRejection(text: string): boolean {
-  const clean = normalizeDecisionText(text);
-  return (
-    /^(却下|見送り|スキップ|skip|やめて|だめ|ダメ|no|ng|stop|キャンセル|投稿しない|投稿しないで)$/i.test(
-      clean
-    ) || /(見送り|スキップ|skip)(?:で|です|します|して|してください|だって)?$/i.test(clean)
-  );
-}
-
-function normalizeDecisionText(text: string): string {
-  return text.replace(/[。、.!！?？\s]/g, '').trim();
 }
 
 interface TwitterActivityLogInput {
