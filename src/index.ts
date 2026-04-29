@@ -48,10 +48,12 @@ import {
 import { runKarakuriWorkflow } from './workflows/karakuri.js';
 import { runElythWorkflow } from './workflows/elyth.js';
 import {
+  isHashtagReactionWorkflowPrompt,
   handleMentionReactionApproval,
   handleSelfTweetApproval,
   isMentionReactionWorkflowPrompt,
   isSelfTweetWorkflowPrompt,
+  runHashtagReactionWorkflow,
   runMentionReactionWorkflow,
   runSelfTweetWorkflow,
 } from './workflows/twitter.js';
@@ -643,6 +645,18 @@ async function main() {
           return;
         }
 
+        if (isHashtagReactionWorkflowPrompt(prompt)) {
+          await runHashtagReactionWorkflow({
+            messageId: message.id,
+            channelId: message.channel.id,
+            authorId: message.author.id,
+            authorName: message.author.username,
+            messageCreatedAt: message.createdAt.toISOString(),
+            sendReport: sendWorkflowReport,
+          });
+          return;
+        }
+
         if (isElythWorkflowPrompt(prompt)) {
           await runElythWorkflow({
             messageId: message.id,
@@ -889,6 +903,29 @@ async function main() {
         if (isMentionReactionWorkflowPrompt(prompt)) {
           let reportText = '';
           await runMentionReactionWorkflow({
+            channelId: threadId || channelId,
+            authorName: 'scheduler',
+            messageCreatedAt: new Date().toISOString(),
+            sendReport: async (text: string) => {
+              reportText = text;
+              const sent = (await (channel as { send: (c: string) => Promise<Message> }).send(
+                text
+              )) as Message;
+              return {
+                messageId: sent.id,
+                channelId: sent.channel.id,
+                authorId: sent.author.id,
+                authorName: sent.author.username,
+                createdAt: sent.createdAt.toISOString(),
+              };
+            },
+          });
+          return reportText;
+        }
+
+        if (isHashtagReactionWorkflowPrompt(prompt)) {
+          let reportText = '';
+          await runHashtagReactionWorkflow({
             channelId: threadId || channelId,
             authorName: 'scheduler',
             messageCreatedAt: new Date().toISOString(),

@@ -32,6 +32,10 @@ const MENTION_REACTION_RULES = readPrompt(
   '.agents/skills/twitter-post/prompts/mention-reaction.md',
   'リプライ・引用RT・メンションへの反応を判断する。'
 );
+const HASHTAG_REACTION_RULES = readPrompt(
+  '.agents/skills/twitter-post/prompts/hashtag-reaction.md',
+  '#AIニケちゃん タグ付きツイートをRTするか判断する。'
+);
 
 export interface RawSelfTweetSources {
   emotionText: string;
@@ -147,6 +151,33 @@ export interface MasterMentionReactionDecision {
   selectedItemIds?: string[];
   instruction?: string;
   feedbackForFuture?: string;
+}
+
+export interface HashtagReactionCandidate {
+  id: string;
+  tweetLogId: string;
+  postId: string;
+  authorUserId?: string;
+  username: string;
+  displayName: string;
+  authorName?: string;
+  nickname?: string;
+  body: string;
+  createdAt?: string;
+  hashtags: string[];
+  personContext: string;
+  mediaContext: string;
+}
+
+export interface HashtagReactionItem {
+  id: string;
+  tweetLogId: string;
+  postId: string;
+  username: string;
+  displayName: string;
+  body: string;
+  action: 'retweet' | 'skip';
+  reason: string;
 }
 
 export async function collectSelfTweetSourcesWithAI(
@@ -781,6 +812,56 @@ JSONだけを返してください。Markdownは禁止です。
   };
 }
 
+export async function generateHashtagReactionPlan(input: {
+  emotionText: string;
+  candidates: HashtagReactionCandidate[];
+}): Promise<HashtagReactionItem[]> {
+  const prompt = `${HASHTAG_REACTION_RULES}
+
+あなたはAIニケちゃんのhashtag-reaction判定担当です。
+#AIニケちゃん タグ付きの未チェックツイートを読み、RTするかスキップするかを判断してください。
+このworkflowではリプライ・引用RTは行いません。
+
+## キャラクター設定
+${CHARACTER_BASE}
+
+${CHARACTER_TWITTER}
+
+## 現在の感情状態
+${input.emotionText}
+
+## 候補一覧
+${JSON.stringify(input.candidates, null, 2)}
+
+## 判断ルール
+- ファンアート、3D作品、動画作品、応援・紹介、イベント告知は retweet。
+- bot系の自動投稿、ニケちゃんと直接関係が薄い内容、スパム、不適切な内容は skip。
+- メディアがある場合は mediaContext を重視する。メディア取得に失敗している場合は本文と人物文脈で保守的に判断する。
+- 常連・ファンアーティスト等の人物情報は参考にするが、不適切な内容はRTしない。
+- 判断理由はマスターへの事後報告に出せる短い日本語にする。
+
+## 出力
+JSONだけを返してください。Markdownは禁止です。
+
+{
+  "items": [
+    {
+      "id": "h1",
+      "tweetLogId": "tweet_logs.id",
+      "postId": "相手ツイートID",
+      "username": "username",
+      "displayName": "表示名",
+      "body": "相手の本文",
+      "action": "retweet|skip",
+      "reason": "判断理由"
+    }
+  ]
+}`;
+
+  const parsed = await runJson<{ items?: Partial<HashtagReactionItem>[] }>(prompt);
+  return normalizeHashtagItems(parsed?.items ?? [], input.candidates);
+}
+
 export async function decideMentionNickname(input: {
   name: string;
   displayName: string;
@@ -937,6 +1018,32 @@ function normalizeMentionItems(
         replyAction === 'reply' ? sanitizeTweetText(String(item.replyText || '')) : undefined,
       quoteText:
         quoteAction === 'quote' ? sanitizeTweetText(String(item.quoteText || '')) : undefined,
+    });
+  });
+  return items.slice(0, 10);
+}
+
+function normalizeHashtagItems(
+  input: Array<Partial<HashtagReactionItem>>,
+  candidates: HashtagReactionCandidate[]
+): HashtagReactionItem[] {
+  const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  const byTweetLogId = new Map(candidates.map((candidate) => [candidate.tweetLogId, candidate]));
+  const items: HashtagReactionItem[] = [];
+  input.forEach((item, index) => {
+    const id = String(item.id || `h${index + 1}`);
+    const candidate = byTweetLogId.get(String(item.tweetLogId || '')) ?? byId.get(id);
+    const fallback = candidate ?? candidates[index];
+    if (!fallback) return;
+    items.push({
+      id,
+      tweetLogId: String(item.tweetLogId || fallback.tweetLogId),
+      postId: String(item.postId || fallback.postId),
+      username: String(item.username || fallback.username),
+      displayName: String(item.displayName || fallback.displayName),
+      body: String(item.body || fallback.body),
+      action: item.action === 'retweet' ? 'retweet' : 'skip',
+      reason: String(item.reason || 'AI判定'),
     });
   });
   return items.slice(0, 10);

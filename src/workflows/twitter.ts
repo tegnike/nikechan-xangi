@@ -5,6 +5,7 @@ import { formatEmotion, getEmotion, recordEmotionShift, runDbSh } from '../lib/d
 import {
   collectSelfTweetSourcesWithAI,
   decideMentionNickname,
+  generateHashtagReactionPlan,
   generateSelfTweetDrafts,
   generateMentionReactionPlan,
   interpretMasterMentionReactionReply,
@@ -14,6 +15,8 @@ import {
   reviseMentionReactionPlanFromMaster,
   reviseSelfTweetDraftsFromMaster,
   sanitizeTweetText,
+  type HashtagReactionCandidate,
+  type HashtagReactionItem,
   type MentionReactionCandidate,
   type MentionReactionItem,
   type MechanicalCheckResult,
@@ -84,6 +87,12 @@ export function isSelfTweetWorkflowPrompt(prompt: string): boolean {
 
 export function isMentionReactionWorkflowPrompt(prompt: string): boolean {
   return /^\/mention-reaction(?:\s|（|\(|$)|^メンションチェック$|^リプライチェック$|^リプ反応$/.test(
+    prompt.trim()
+  );
+}
+
+export function isHashtagReactionWorkflowPrompt(prompt: string): boolean {
+  return /^\/hashtag-reaction(?:\s|（|\(|$)|^ハッシュタグチェック$|^ハッシュタグ反応$/.test(
     prompt.trim()
   );
 }
@@ -503,6 +512,79 @@ export async function handleMentionReactionApproval(
   return true;
 }
 
+export async function runHashtagReactionWorkflow(opts: TwitterWorkflowOptions): Promise<void> {
+  const channelId = opts.channelId;
+  if (!channelId) throw new Error('channelId is required for hashtag-reaction workflow');
+  const runKey = opts.messageId
+    ? `twitter:hashtag-reaction:${opts.messageId}`
+    : `twitter:hashtag-reaction:${Date.now()}`;
+
+  try {
+    const [emotion, candidates] = await Promise.all([
+      getEmotion(),
+      collectHashtagReactionCandidates(),
+    ]);
+    if (!candidates.length) {
+      await opts.sendReport('未チェックのハッシュタグツイートはありませんでした。');
+      await addTwitterActivityLog({
+        ...activityMeta(opts, runKey),
+        workflow: 'hashtag-reaction',
+        stage: 'source_collect',
+        raw_content: 'no unchecked hashtag tweets',
+        parsed: { count: 0 },
+      });
+      return;
+    }
+
+    const emotionText = formatEmotion(emotion);
+    await addTwitterActivityLog({
+      ...activityMeta(opts, runKey),
+      workflow: 'hashtag-reaction',
+      stage: 'source_collect',
+      raw_content: candidates.map((candidate) => candidate.body).join('\n---\n'),
+      parsed: { candidates, emotion_text: emotionText },
+    });
+
+    const items = await generateHashtagReactionPlan({ emotionText, candidates });
+    await addTwitterActivityLog({
+      ...activityMeta(opts, runKey),
+      workflow: 'hashtag-reaction',
+      stage: 'plan',
+      raw_content: items.map((item) => `${item.action}: ${item.body}`).join('\n---\n'),
+      parsed: { items },
+    });
+
+    await markTweetLogsChecked(candidates.map((candidate) => candidate.tweetLogId));
+    await addTwitterActivityLog({
+      ...activityMeta(opts, runKey),
+      workflow: 'hashtag-reaction',
+      stage: 'mechanical_check',
+      raw_content: 'hashtag checked_by_nikechan updated',
+      parsed: { checked_tweet_log_ids: candidates.map((candidate) => candidate.tweetLogId) },
+    });
+
+    const result = await executeHashtagReactions(items, candidates, opts);
+    await addTwitterActivityLog({
+      ...activityMeta(opts, runKey),
+      workflow: 'hashtag-reaction',
+      stage: 'execute',
+      raw_content: result.summary,
+      parsed: result,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[twitter] hashtag-reaction workflow failed:', err);
+    await addTwitterActivityLog({
+      ...activityMeta(opts, runKey),
+      workflow: 'hashtag-reaction',
+      stage: 'error',
+      raw_content: message,
+      parsed: { error: message },
+    });
+    await opts.sendReport(`⚠️ ハッシュタグ反応ワークフロー失敗: ${message.slice(0, 300)}`);
+  }
+}
+
 async function createPendingMentionReaction(
   channelId: string,
   revisionCount: number
@@ -572,6 +654,36 @@ async function collectMentionReactionCandidates(): Promise<MentionReactionCandid
   return candidates.filter((candidate) => candidate.tweetLogId && candidate.postId);
 }
 
+async function collectHashtagReactionCandidates(): Promise<HashtagReactionCandidate[]> {
+  const raw = await safeDb(['tweet-log-unchecked-hashtag']);
+  const logs = parseJsonArray<HashtagTweetLogRecord>(raw)
+    .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
+    .slice(0, 10);
+
+  const candidates = await Promise.all(
+    logs.map(async (log, index) => {
+      const authorContext = await collectTweetAuthorContext(log);
+      const mediaContext = await collectHashtagMediaContext(log.post_id);
+      return {
+        id: `h${index + 1}`,
+        tweetLogId: log.id,
+        postId: log.post_id,
+        authorUserId: authorContext.userId || undefined,
+        username: log.username || '',
+        displayName: log.name || log.username || '',
+        authorName: authorContext.authorName || undefined,
+        nickname: authorContext.nickname || undefined,
+        body: log.body || '',
+        createdAt: log.created_at,
+        hashtags: Array.isArray(log.hashtags) ? log.hashtags.map(String) : [],
+        personContext: authorContext.text,
+        mediaContext,
+      };
+    })
+  );
+  return candidates.filter((candidate) => candidate.tweetLogId && candidate.postId);
+}
+
 interface TweetLogRecord {
   id: string;
   post_id: string;
@@ -583,6 +695,10 @@ interface TweetLogRecord {
   original_tweet_id?: string | null;
   original_tweet_url?: string | null;
   created_at?: string;
+}
+
+interface HashtagTweetLogRecord extends TweetLogRecord {
+  hashtags?: string[];
 }
 
 interface OriginalTweetRecord {
@@ -680,6 +796,26 @@ async function collectThirdPartyContext(text: string): Promise<string> {
     )
   );
   return results.join('\n\n');
+}
+
+async function collectHashtagMediaContext(postId: string): Promise<string> {
+  if (!postId) return '（post_idなし）';
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const res = await fetch(`https://api.fxtwitter.com/status/${postId}`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return `（fxtwitter取得失敗: ${res.status}）`;
+    const parsed = (await res.json()) as Record<string, unknown>;
+    const tweet = parsed.tweet && typeof parsed.tweet === 'object' ? parsed.tweet : parsed;
+    const media = (tweet as Record<string, unknown>).media;
+    if (!media) return '（メディアなし）';
+    return truncateBlock(JSON.stringify(media, null, 2), 2000);
+  } catch (err) {
+    return `（メディア取得失敗: ${err instanceof Error ? err.message : String(err)}）`;
+  }
 }
 
 function extractMentionPersonTerms(text: string): string[] {
@@ -1009,6 +1145,123 @@ async function recordMentionContactEpisode(
     item.tweetLogId,
   ]);
   await runDbSh(['user-touch', ensured.id]);
+}
+
+async function executeHashtagReactions(
+  items: HashtagReactionItem[],
+  candidates: HashtagReactionCandidate[],
+  opts: TwitterWorkflowOptions
+): Promise<{
+  summary: string;
+  results: Array<{ item_id: string; action: string; url?: string; error?: string; reason: string }>;
+}> {
+  const candidateByLogId = new Map(
+    candidates.map((candidate) => [candidate.tweetLogId, candidate])
+  );
+  const results: Array<{
+    item_id: string;
+    action: string;
+    url?: string;
+    error?: string;
+    reason: string;
+  }> = [];
+  let retweetCount = 0;
+  let skipCount = 0;
+
+  for (const item of items) {
+    const candidate = candidateByLogId.get(item.tweetLogId);
+    const result = {
+      item_id: item.id,
+      action: item.action,
+      reason: item.reason,
+      url: undefined as string | undefined,
+      error: undefined as string | undefined,
+    };
+    try {
+      if (item.action === 'retweet') {
+        if (isTwitterWorkflowDryRun()) {
+          result.url = `dry-run retweet: ${item.postId}`;
+        } else {
+          result.url = await runTwitterPost(['retweet', item.postId, 'hashtag-reaction']);
+        }
+        retweetCount += 1;
+        await runDbSh(['tweet-log-action', item.tweetLogId, 'retweet']).catch((e) =>
+          console.error('[twitter] hashtag tweet-log-action failed:', e)
+        );
+        if (candidate?.authorUserId) {
+          await runDbSh([
+            'ce-add-ref',
+            candidate.authorUserId,
+            `@${item.username} の #AIニケちゃん ツイート「${item.body.slice(0, 60)}」をRT`,
+            'twitter',
+            'rt',
+            'tweet_logs',
+            item.tweetLogId,
+          ]).catch((e) => console.error('[twitter] hashtag ce-add-ref failed:', e));
+          await runDbSh(['user-touch', candidate.authorUserId]).catch((e) =>
+            console.error('[twitter] hashtag user-touch failed:', e)
+          );
+        }
+      } else {
+        skipCount += 1;
+        await runDbSh(['tweet-log-action', item.tweetLogId, 'skip']).catch((e) =>
+          console.error('[twitter] hashtag skip action failed:', e)
+        );
+      }
+    } catch (err) {
+      result.error = err instanceof Error ? err.message : String(err);
+      console.error('[twitter] hashtag retweet failed:', err);
+    }
+    results.push(result);
+  }
+
+  if (retweetCount > 0) {
+    await recordEmotionShift(
+      0.1,
+      0.05,
+      0,
+      'hashtag-reaction',
+      `#AIニケちゃん ツイート${retweetCount}件をRT`,
+      '自分のために投稿してくれた嬉しさ'
+    ).catch((e) => console.error('[twitter] hashtag emotion-shift failed:', e));
+  }
+
+  const summary = `${items.length}件チェック: RT${retweetCount}件、スキップ${skipCount}件`;
+  await opts.sendReport(formatHashtagReport(items, results));
+  return { summary, results };
+}
+
+function formatHashtagReport(
+  items: HashtagReactionItem[],
+  results: Array<{ item_id: string; action: string; url?: string; error?: string; reason: string }>
+): string {
+  const resultById = new Map(results.map((result) => [result.item_id, result]));
+  const retweets = items.filter((item) => resultById.get(item.id)?.action === 'retweet');
+  const skips = items.filter((item) => resultById.get(item.id)?.action !== 'retweet');
+  const lines = ['🎨 ハッシュタグ反応レポート', ''];
+  lines.push(`🔄 RT（${retweets.length}件）:`);
+  if (retweets.length) {
+    retweets.forEach((item, index) => {
+      const result = resultById.get(item.id);
+      lines.push(`${index + 1}. @${item.username} - 「${truncateInline(item.body, 90)}」`);
+      lines.push(`   → 理由: ${item.reason}`);
+      if (result?.error) lines.push(`   → エラー: ${truncateInline(result.error, 120)}`);
+      else if (result?.url) lines.push(`   → ${result.url}`);
+    });
+  } else {
+    lines.push('なし');
+  }
+  lines.push('');
+  lines.push(`⏭️ スキップ（${skips.length}件）:`);
+  if (skips.length) {
+    skips.forEach((item, index) => {
+      lines.push(`${index + 1}. @${item.username} - 「${truncateInline(item.body, 90)}」`);
+      lines.push(`   → 理由: ${item.reason}`);
+    });
+  } else {
+    lines.push('なし');
+  }
+  return lines.join('\n');
 }
 
 async function markTweetLogsChecked(ids: string[]): Promise<void> {
