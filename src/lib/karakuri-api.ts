@@ -3,7 +3,13 @@ import { join } from 'path';
 
 const WORKDIR = process.env.WORKSPACE_PATH || process.cwd();
 
-const BUSY_CODES = ['state_conflict', 'not_your_turn'];
+const BUSY_CODES = [
+  'state_conflict',
+  'not_your_turn',
+  'target_unavailable',
+  'invalid_next_speaker',
+  'conversation_not_found',
+];
 
 export async function runKarakuriCommand(
   command: string,

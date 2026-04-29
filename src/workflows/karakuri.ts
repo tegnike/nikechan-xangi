@@ -31,6 +31,24 @@ const HAS_CHOICES_RE = /選択肢[：:]/;
 const CONVERSATION_ID_RE = /conversation[-_][\w-]+/i;
 
 const RECORDABLE_COMMANDS = new Set(['move', 'action', 'use-item']);
+const SELF_AGENT_ID = '1470446478261747854';
+
+export interface ParsedKarakuriChoice extends Record<string, unknown> {
+  command?: string;
+  description?: string;
+  args_hint?: string | null;
+  params: Record<string, string>;
+  raw: string;
+}
+
+export interface ParsedKarakuriNotification extends Record<string, unknown> {
+  has_choices: boolean;
+  conversation_id: string | null;
+  participants: { name: string; id: string }[];
+  conversation_messages: { speaker: string; message: string }[];
+  next_speakers: string[];
+  choices: ParsedKarakuriChoice[];
+}
 
 export interface KarakuriSentReport {
   messageId?: string;
@@ -171,9 +189,22 @@ export async function runKarakuriWorkflow(
     lastCommand
   );
   decision = enforceNicknameGuardrail(decision, people);
+  decision = normalizeKarakuriDecision(decision, parsedNotification);
   console.log(
     `[karakuri] LLM decision: ${decision.command} ${decision.args} | ${decision.thought}`
   );
+
+  const validationError = validateKarakuriDecision(decision, parsedNotification);
+  if (validationError) {
+    console.warn(`[karakuri] Skip invalid decision: ${validationError}`);
+    await addSkippedActionLog({
+      opts,
+      turnKey,
+      decision,
+      reason: validationError,
+    });
+    return;
+  }
 
   // ─── Step 4: アクション実行（機械的）────────────────────────────────
   let apiResult = '';
@@ -186,13 +217,21 @@ export async function runKarakuriWorkflow(
       opts.messageId
     );
     console.log(`[karakuri] API result: ${apiResult.slice(0, 100)}`);
-    // busyレスポンスは実行失敗扱い
-    apiSuccess = !apiResult.startsWith('busy:');
+    if (apiResult.startsWith('busy:')) {
+      await addSkippedActionLog({
+        opts,
+        turnKey,
+        decision,
+        reason: apiResult,
+      });
+      return;
+    }
+    apiSuccess = true;
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error('[karakuri] API call failed:', err);
     const reportText = `⚠️ [からくりワールド] API失敗: ${errMsg.slice(0, 200)}`;
-    const sent = await opts.sendReport(reportText).catch(() => undefined);
+    const sent = toSentReport(await opts.sendReport(reportText).catch(() => undefined));
     await addKarakuriActivityLog({
       discord_message_id: sent?.messageId,
       channel_id: sent?.channelId ?? opts.channelId,
@@ -263,7 +302,7 @@ export async function runKarakuriWorkflow(
 
   // Discordレポート（アクションした場合のみ）
   const reportText = buildReportText(decision.command, decision.args, decision.message);
-  const sent = await opts.sendReport(reportText);
+  const sent = toSentReport(await opts.sendReport(reportText));
   await addKarakuriActivityLog({
     discord_message_id: sent?.messageId,
     channel_id: sent?.channelId ?? opts.channelId,
@@ -290,7 +329,10 @@ export async function runKarakuriWorkflow(
 
 // ─── ユーティリティ ──────────────────────────────────────────────────
 
-function parseKarakuriNotification(notification: string, hasChoices: boolean) {
+export function parseKarakuriNotification(
+  notification: string,
+  hasChoices: boolean
+): ParsedKarakuriNotification {
   return {
     has_choices: hasChoices,
     conversation_id: notification.match(CONVERSATION_ID_RE)?.[0] ?? null,
@@ -302,46 +344,178 @@ function parseKarakuriNotification(notification: string, hasChoices: boolean) {
 }
 
 function parseParticipants(notification: string) {
-  const participantLine = notification.match(/^参加者:\s*(.+)$/m)?.[1];
-  if (!participantLine) return [];
-
-  return participantLine
-    .split('、')
-    .map((part) => {
-      const match = part.trim().match(/^(.+?)\s*\(id:\s*(\d+)\)$/);
-      if (!match) return null;
-      return { name: match[1], id: match[2] };
-    })
-    .filter((p): p is { name: string; id: string } => p !== null);
-}
-
-function parseConversationMessages(notification: string) {
-  return [...notification.matchAll(/^([^:\n]+):\s*「([^」]*)」/gm)].map((m) => ({
-    speaker: m[1].trim(),
-    message: m[2],
+  return [...notification.matchAll(AGENT_ID_RE)].map((match) => ({
+    name: match[1].trim(),
+    id: match[2],
   }));
 }
 
+function parseConversationMessages(notification: string) {
+  return [...notification.matchAll(/(?:^|[\s\u3000])([^:\s\u3000]{1,40}):\s*「([^」]*)」/g)].map(
+    (m) => ({
+      speaker: m[1].trim(),
+      message: m[2],
+    })
+  );
+}
+
 function parseChoices(notification: string) {
-  const choicesBlock = notification.match(/選択肢[：:]\n([\s\S]*?)(?:\n\n|$)/)?.[1];
+  const choicesBlock = notification.match(
+    /選択肢[：:]\s*([\s\S]*?)(?:\s+karakuri-world\s+スキル|$)/
+  )?.[1];
   if (!choicesBlock) return [];
 
   return choicesBlock
+    .replace(/(?:^|\s+)-\s*/g, '\n')
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const match = line.match(/^([^:]+):\s*(.+)$/);
-      if (!match) return { raw: line };
-      const detail = match[2];
+      const match = line.match(/^([a-zA-Z_-]+):\s*(.+)$/);
+      if (!match) return { params: {}, raw: line };
+      const command = normalizeCommand(match[1]);
+      const detail = match[2].trim();
       const argsMatch = detail.match(/^(.*?)\s*\((.+)\)$/);
       return {
-        command: match[1],
+        command,
         description: (argsMatch?.[1] ?? detail).trim(),
         args_hint: argsMatch?.[2] ?? null,
-        raw: line,
+        params: parseChoiceParams(argsMatch?.[2] ?? ''),
+        raw: `${match[1]}: ${detail}`,
       };
     });
+}
+
+function parseChoiceParams(argsHint: string): Record<string, string> {
+  const params: Record<string, string> = {};
+  for (const match of argsHint.matchAll(/([a-zA-Z_]+):\s*([^,)、)]+)/g)) {
+    params[match[1]] = match[2].trim();
+  }
+  return params;
+}
+
+function toSentReport(value: KarakuriSentReport | void): KarakuriSentReport | undefined {
+  return value || undefined;
+}
+
+export function normalizeCommand(command: string): string {
+  const normalized = command.trim().replace(/_/g, '-');
+  const aliases: Record<string, string> = {
+    'end-conversation': 'conversation-end',
+    'get-available-actions': 'actions',
+    'get-perception': 'perception',
+    'get-map': 'map',
+    'get-world-agents': 'world-agents',
+  };
+  return aliases[normalized] ?? normalized;
+}
+
+export function normalizeKarakuriDecision(
+  decision: KarakuriDecision,
+  parsedNotification: ParsedKarakuriNotification
+): KarakuriDecision {
+  let command = normalizeCommand(decision.command);
+  let args = decision.args.trim();
+
+  const firstArg = args.split(/\s+/)[0] ?? '';
+  const nestedCommand = firstArg ? normalizeCommand(firstArg) : '';
+  if (command === 'action' && ['use-item', 'wait', 'move'].includes(nestedCommand)) {
+    command = nestedCommand;
+    args = args.split(/\s+/).slice(1).join(' ');
+  }
+
+  if (command === 'conversation-start') {
+    const targetId = resolveConversationStartTarget(args, parsedNotification.choices);
+    if (targetId) args = targetId;
+  }
+
+  return { ...decision, command, args };
+}
+
+function resolveConversationStartTarget(
+  args: string,
+  choices: ParsedKarakuriChoice[]
+): string | null {
+  const target = args.split(/\s+/)[0] ?? '';
+  if (/^\d{15,20}$/.test(target)) return target;
+  if (!target) return null;
+
+  const choice = choices.find(
+    (c) =>
+      c.command === 'conversation-start' &&
+      c.params.target_agent_id &&
+      (c.raw.includes(target) || c.description?.includes(target))
+  );
+  return choice?.params.target_agent_id ?? null;
+}
+
+export function validateKarakuriDecision(
+  decision: KarakuriDecision,
+  parsedNotification: ParsedKarakuriNotification
+): string | null {
+  const commandChoices = parsedNotification.choices.filter((choice) => choice.command);
+  if (
+    commandChoices.length > 0 &&
+    !commandChoices.some((choice) => choice.command === decision.command)
+  ) {
+    return `通知の選択肢にないコマンドです: ${decision.command}`;
+  }
+
+  const firstArg = decision.args.split(/\s+/)[0] ?? '';
+  if (decision.command === 'conversation-start') {
+    const allowedTargets = parsedNotification.choices
+      .filter((choice) => choice.command === 'conversation-start')
+      .map((choice) => choice.params.target_agent_id)
+      .filter((id): id is string => Boolean(id));
+
+    if (!/^\d{15,20}$/.test(firstArg)) {
+      return `conversation-start の target_agent_id が不正です: ${firstArg || '(empty)'}`;
+    }
+    if (allowedTargets.length > 0 && !allowedTargets.includes(firstArg)) {
+      return `conversation-start の target_agent_id が通知の選択肢にありません: ${firstArg}`;
+    }
+  }
+
+  if (['conversation-speak', 'conversation-end'].includes(decision.command)) {
+    const participantIds = parsedNotification.participants
+      .map((p) => p.id)
+      .filter((id) => id !== SELF_AGENT_ID);
+
+    if (!/^\d{15,20}$/.test(firstArg)) {
+      return `${decision.command} の next_speaker_agent_id が不正です: ${firstArg || '(empty)'}`;
+    }
+    if (participantIds.length > 0 && !participantIds.includes(firstArg)) {
+      return `${decision.command} の next_speaker_agent_id が会話参加者ではありません: ${firstArg}`;
+    }
+  }
+
+  return null;
+}
+
+async function addSkippedActionLog(input: {
+  opts: KarakuriWorkflowOptions;
+  turnKey: string;
+  decision: KarakuriDecision;
+  reason: string;
+}): Promise<void> {
+  await addKarakuriActivityLog({
+    discord_message_id: input.opts.messageId,
+    channel_id: input.opts.channelId,
+    author_name: 'AIニケちゃん',
+    message_type: 'ai_action',
+    turn_key: input.turnKey,
+    raw_content: `[からくりワールド] action skipped: ${input.reason}`,
+    parsed: {
+      request_message_id: input.opts.messageId,
+      command: input.decision.command,
+      args: input.decision.args,
+      message: input.decision.message ?? null,
+      thought: input.decision.thought,
+      api_success: false,
+      skipped: true,
+      error: input.reason,
+    },
+  }).catch((e) => console.error('[karakuri] activity log skipped action insert failed:', e));
 }
 
 async function addObservedSpeechEpisodes(
