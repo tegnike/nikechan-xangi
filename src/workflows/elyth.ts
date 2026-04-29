@@ -9,6 +9,7 @@ import {
   getElythPeopleList,
   getRecentContactEpisodes,
   recordEmotionShift,
+  runDbSh,
   setElythFollowed,
   touchUser,
   updateUserBio,
@@ -16,7 +17,7 @@ import {
   type ElythPostLogRow,
 } from '../lib/db-helpers.js';
 import { ElythMcpClient } from '../lib/elyth-mcp.js';
-import { decideElythPlan } from '../lib/elyth-llm.js';
+import { collectElythSelfPostSources, decideElythPlan } from '../lib/elyth-llm.js';
 import {
   buildElythCandidates,
   emptyElythPlan,
@@ -56,6 +57,7 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
     const availableTools = new Set(await mcp.getToolNames().catch(() => []));
     const information = await mcp.getInformation();
     const myPosts = await mcp.getMyPosts(5);
+    const rawSelfPostSourceData = await collectRawSelfPostSourceData();
 
     const candidates = buildElythCandidates(information);
     await enrichCandidateThreads(
@@ -73,6 +75,22 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
     const emotionText = formatEmotion(emotion);
     const worldContext = formatElythWorldContext(candidates);
     const humanNotificationsText = formatHumanNotifications(candidates.notifications);
+    const myPostsText = formatMyPosts(myPosts);
+    const selfPostSourceCollection = await collectElythSelfPostSources({
+      emotionText,
+      rawSourceData: rawSelfPostSourceData,
+      todayTopic: candidates.todayTopic,
+      worldContext,
+      myPostsText,
+    }).catch((e) => {
+      console.error('[elyth] self-post source collection failed:', e);
+      return {
+        summary: `自発投稿ソース収集失敗: ${errorMessage(e)}`,
+        candidates: [],
+        rejected: [],
+        recentPatternNotes: '',
+      };
+    });
 
     const fetchLog = await addElythActivityLog({
       discord_message_id: opts.messageId,
@@ -91,6 +109,8 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
           .length,
         timeline_count: candidates.timeline.length,
         today_topic: candidates.todayTopic ?? null,
+        raw_self_post_sources: rawSelfPostSourceData,
+        self_post_source_collection: selfPostSourceCollection,
         world_context: worldContext,
         available_tools: [...availableTools],
         image_generation_log_count: candidates.imageGenerationLog.length,
@@ -109,7 +129,8 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
       todayTopic: candidates.todayTopic,
       worldContext,
       humanNotificationsText,
-      myPostsText: formatMyPosts(myPosts),
+      myPostsText,
+      selfPostSourceCollection,
     }).catch((e) => {
       console.error('[elyth] LLM plan failed:', e);
       return emptyElythPlan();
@@ -194,6 +215,39 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
   } finally {
     await mcp.close().catch(() => {});
   }
+}
+
+async function collectRawSelfPostSourceData(): Promise<string> {
+  const today = new Date().toISOString().slice(0, 10);
+  const [episodes, tasks, notes] = await Promise.all([
+    safeDb(['ep-list', today]),
+    safeDb(['task-list', 'in_progress']),
+    safeDb(['note-list']),
+  ]);
+
+  return [
+    '## 今日のエピソード',
+    truncateBlock(episodes, 1600),
+    '',
+    '## 進行中タスク',
+    truncateBlock(tasks, 1200),
+    '',
+    '## 最近のノート',
+    truncateBlock(notes, 1200),
+  ].join('\n');
+}
+
+async function safeDb(args: string[]): Promise<string> {
+  try {
+    return await runDbSh(args);
+  } catch (err) {
+    return `取得失敗: ${errorMessage(err)}`;
+  }
+}
+
+function truncateBlock(text: string, max: number): string {
+  const trimmed = (text || '（なし）').trim();
+  return trimmed.length > max ? `${trimmed.slice(0, max)}\n...（省略）` : trimmed;
 }
 
 async function enrichCandidateThreads(
