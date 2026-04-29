@@ -100,6 +100,7 @@ export interface MasterSelfTweetDecision {
   action: 'post' | 'revise' | 'cancel';
   selectedDraftId?: string;
   instruction?: string;
+  responseMessage?: string;
   feedbackForFuture?: string;
 }
 
@@ -150,6 +151,7 @@ export interface MasterMentionReactionDecision {
   action: 'execute' | 'revise' | 'cancel';
   selectedItemIds?: string[];
   instruction?: string;
+  responseMessage?: string;
   feedbackForFuture?: string;
 }
 
@@ -415,6 +417,7 @@ ${input.pending.revisionCount}
 - 「微妙」「全体的に違う」「もっと良くして」などの否定的評価は見送りではなく action=revise。マスターが見送るかどうかを判断するので、曖昧な不満で候補を脱落させない。
 - 文体修正、内容追加、別案希望、混ぜて、短く等、マスターが本文変更を求めている場合だけ action=revise。revise後は再提示して、次のマスター返信を待つ。
 - revise の場合、instruction にマスターの意図と保持すべき文脈を具体的に書く。
+- cancel の場合、responseMessage にマスターへ返す短い自然な返答を書く。マスターの文脈に合わせ、定型文だけにしない。
 - 今後も適用すべき口調・題材・判断ルールが含まれていれば feedbackForFuture に短く書く。一回限りなら省略する。
 
 ## 出力
@@ -424,6 +427,7 @@ JSONだけを返してください。Markdownは禁止です。
   "action": "post|revise|cancel",
   "selectedDraftId": "d1",
   "instruction": "修正指示。post/cancelなら省略可",
+  "responseMessage": "cancel時にDiscordへ返す短い文。post/reviseなら省略可",
   "feedbackForFuture": "今後も適用するルール。なければ省略"
 }`;
 
@@ -437,6 +441,8 @@ JSONだけを返してください。Markdownは禁止です。
     selectedDraftId:
       typeof decision?.selectedDraftId === 'string' ? decision.selectedDraftId : undefined,
     instruction: typeof decision?.instruction === 'string' ? decision.instruction : input.message,
+    responseMessage:
+      typeof decision?.responseMessage === 'string' ? decision.responseMessage : undefined,
     feedbackForFuture:
       typeof decision?.feedbackForFuture === 'string' ? decision.feedbackForFuture : undefined,
   };
@@ -702,6 +708,7 @@ ${input.pending.revisionCount}
 - 「スキップしないでリプして」「2はスキップ、1はリプ」のように個別の実行内容を指定している場合は action=execute または action=revise として文脈から判断する。
 - 文体修正、個別修正、別案希望、短く、もっと柔らかく等、マスターが本文変更を求めている場合だけ action=revise。revise後は再提示して、次のマスター返信を待つ。
 - revise の場合、instruction にマスターの意図と対象候補を具体的に書く。
+- cancel の場合、responseMessage にマスターへ返す短い自然な返答を書く。マスターの文脈に合わせ、定型文だけにしない。
 - 今後も適用すべき口調・人物別対応・判断ルールが含まれていれば feedbackForFuture に短く書く。
 
 ## 出力
@@ -711,6 +718,7 @@ JSONだけを返してください。Markdownは禁止です。
   "action": "execute|revise|cancel",
   "selectedItemIds": ["m1"],
   "instruction": "修正指示。execute/cancelなら省略可",
+  "responseMessage": "cancel時にDiscordへ返す短い文。execute/reviseなら省略可",
   "feedbackForFuture": "今後も適用するルール。なければ省略"
 }`;
 
@@ -725,6 +733,8 @@ JSONだけを返してください。Markdownは禁止です。
       ? decision.selectedItemIds.map(String)
       : undefined,
     instruction: typeof decision?.instruction === 'string' ? decision.instruction : input.message,
+    responseMessage:
+      typeof decision?.responseMessage === 'string' ? decision.responseMessage : undefined,
     feedbackForFuture:
       typeof decision?.feedbackForFuture === 'string' ? decision.feedbackForFuture : undefined,
   };

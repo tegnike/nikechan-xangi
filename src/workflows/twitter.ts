@@ -306,7 +306,7 @@ export async function handleSelfTweetApproval(
       message: normalized,
     });
     await opts.setPhase?.('text');
-    await opts.sendReport('了解です。今回は見送ります。');
+    await opts.sendReport(decision.responseMessage || '了解です。今回は見送ります。');
     return true;
   }
 
@@ -534,7 +534,7 @@ export async function handleMentionReactionApproval(
       message: normalized,
     });
     await opts.setPhase?.('text');
-    await opts.sendReport('了解です。今回は見送ります。');
+    await opts.sendReport(decision.responseMessage || '了解です。今回は見送ります。');
     return true;
   }
 
