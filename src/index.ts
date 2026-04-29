@@ -48,8 +48,11 @@ import {
 import { runKarakuriWorkflow } from './workflows/karakuri.js';
 import { runElythWorkflow } from './workflows/elyth.js';
 import {
+  handleMentionReactionApproval,
   handleSelfTweetApproval,
+  isMentionReactionWorkflowPrompt,
   isSelfTweetWorkflowPrompt,
+  runMentionReactionWorkflow,
   runSelfTweetWorkflow,
 } from './workflows/twitter.js';
 import {
@@ -606,8 +609,30 @@ async function main() {
         });
         if (handledSelfTweetApproval) return;
 
+        const handledMentionReactionApproval = await handleMentionReactionApproval(prompt, {
+          messageId: message.id,
+          channelId: message.channel.id,
+          authorId: message.author.id,
+          authorName: message.author.username,
+          messageCreatedAt: message.createdAt.toISOString(),
+          sendReport: sendWorkflowReport,
+        });
+        if (handledMentionReactionApproval) return;
+
         if (isSelfTweetWorkflowPrompt(prompt)) {
           await runSelfTweetWorkflow({
+            messageId: message.id,
+            channelId: message.channel.id,
+            authorId: message.author.id,
+            authorName: message.author.username,
+            messageCreatedAt: message.createdAt.toISOString(),
+            sendReport: sendWorkflowReport,
+          });
+          return;
+        }
+
+        if (isMentionReactionWorkflowPrompt(prompt)) {
+          await runMentionReactionWorkflow({
             messageId: message.id,
             channelId: message.channel.id,
             authorId: message.author.id,
@@ -841,6 +866,29 @@ async function main() {
         if (isSelfTweetWorkflowPrompt(prompt)) {
           let reportText = '';
           await runSelfTweetWorkflow({
+            channelId: threadId || channelId,
+            authorName: 'scheduler',
+            messageCreatedAt: new Date().toISOString(),
+            sendReport: async (text: string) => {
+              reportText = text;
+              const sent = (await (channel as { send: (c: string) => Promise<Message> }).send(
+                text
+              )) as Message;
+              return {
+                messageId: sent.id,
+                channelId: sent.channel.id,
+                authorId: sent.author.id,
+                authorName: sent.author.username,
+                createdAt: sent.createdAt.toISOString(),
+              };
+            },
+          });
+          return reportText;
+        }
+
+        if (isMentionReactionWorkflowPrompt(prompt)) {
+          let reportText = '';
+          await runMentionReactionWorkflow({
             channelId: threadId || channelId,
             authorName: 'scheduler',
             messageCreatedAt: new Date().toISOString(),

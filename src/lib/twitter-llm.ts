@@ -28,6 +28,10 @@ const TWEET_REVIEW_RULES = readPrompt(
   '.agents/skills/twitter-post/prompts/tweet-review.md',
   '事実正確性、口調、読者理解度を確認する。'
 );
+const MENTION_REACTION_RULES = readPrompt(
+  '.agents/skills/twitter-post/prompts/mention-reaction.md',
+  'リプライ・引用RT・メンションへの反応を判断する。'
+);
 
 export interface RawSelfTweetSources {
   emotionText: string;
@@ -91,6 +95,56 @@ export interface ReviewedSelfTweetDraft extends SelfTweetDraft {
 export interface MasterSelfTweetDecision {
   action: 'post' | 'revise' | 'cancel';
   selectedDraftId?: string;
+  instruction?: string;
+  feedbackForFuture?: string;
+}
+
+export interface MentionReactionCandidate {
+  id: string;
+  tweetLogId: string;
+  postId: string;
+  authorUserId?: string;
+  username: string;
+  displayName: string;
+  authorName?: string;
+  nickname?: string;
+  type: string;
+  body: string;
+  createdAt?: string;
+  originalTweetId?: string;
+  originalTweetText?: string;
+  originalTweetUrl?: string;
+  personContext: string;
+}
+
+export interface MentionReactionItem {
+  id: string;
+  tweetLogId: string;
+  postId: string;
+  username: string;
+  displayName: string;
+  type: string;
+  body: string;
+  originalTweetId?: string;
+  originalTweetText?: string;
+  replyAction: 'reply' | 'skip';
+  quoteAction: 'quote' | 'skip';
+  reason: string;
+  replyText?: string;
+  quoteText?: string;
+}
+
+export interface ReviewedMentionReactionItem extends MentionReactionItem {
+  replyMechanicalCheck?: MechanicalCheckResult;
+  quoteMechanicalCheck?: MechanicalCheckResult;
+  review: TweetReviewResult;
+  revisionNotes: string;
+  reviewSessionId?: string;
+}
+
+export interface MasterMentionReactionDecision {
+  action: 'execute' | 'revise' | 'cancel';
+  selectedItemIds?: string[];
   instruction?: string;
   feedbackForFuture?: string;
 }
@@ -160,7 +214,7 @@ export async function generateSelfTweetDrafts(input: {
   personContext?: string;
   performanceContext?: string;
   runStateContext?: string;
-}): Promise<SelfTweetDraft[]> {
+}): Promise<{ drafts: SelfTweetDraft[]; sessionId?: string }> {
   const prompt = `${SELF_TWEET_RULES}
 
 あなたはAIニケちゃんのTwitter投稿案作成担当です。
@@ -209,8 +263,11 @@ JSONだけを返してください。Markdownは禁止です。
   ]
 }`;
 
-  const parsed = await runJson<{ drafts?: SelfTweetDraft[] }>(prompt);
-  return normalizeDrafts(parsed?.drafts ?? []);
+  const result = await runJsonResult<{ drafts?: SelfTweetDraft[] }>(prompt);
+  return {
+    drafts: normalizeDrafts(result.value?.drafts ?? []),
+    sessionId: result.sessionId,
+  };
 }
 
 export async function reviewAndReviseSelfTweetDraft(input: {
@@ -320,10 +377,11 @@ ${input.pending.revisionCount}
 
 ## 判断ルール
 - 「1」「2番」「これ」「OK」「どうぞ」など、投稿対象が明確なら action=post。
+- 「1で良い」「3案で」「これで投稿」「このまま」など、マスターが承認している場合は即投稿する。承認後に再提示しない。
 - 番号指定なしのOKは、最初の候補を選ぶ。
 - 明確に「却下」「見送り」「やめて」「キャンセル」「NG」「投稿しない」と言っている場合だけ action=cancel。
 - 「微妙」「全体的に違う」「もっと良くして」などの否定的評価は見送りではなく action=revise。マスターが見送るかどうかを判断するので、曖昧な不満で候補を脱落させない。
-- 文体修正、内容追加、別案希望、混ぜて、短く等は action=revise。
+- 文体修正、内容追加、別案希望、混ぜて、短く等、マスターが本文変更を求めている場合だけ action=revise。revise後は再提示して、次のマスター返信を待つ。
 - revise の場合、instruction にマスターの意図と保持すべき文脈を具体的に書く。
 - 今後も適用すべき口調・題材・判断ルールが含まれていれば feedbackForFuture に短く書く。一回限りなら省略する。
 
@@ -436,6 +494,326 @@ JSONだけを返してください。Markdownは禁止です。
   };
 }
 
+export async function generateMentionReactionPlan(input: {
+  emotionText: string;
+  candidates: MentionReactionCandidate[];
+}): Promise<{ items: MentionReactionItem[]; sessionId?: string }> {
+  const prompt = `${MENTION_REACTION_RULES}
+
+あなたはAIニケちゃんのmention-reaction判定担当です。
+未チェックのリプライ・引用RT・@メンションに対して、返信・引用RT・スキップを判断してください。
+
+## キャラクター設定
+${CHARACTER_BASE}
+
+${CHARACTER_TWITTER}
+
+## 現在の感情状態
+${input.emotionText}
+
+## 候補一覧
+${JSON.stringify(input.candidates, null, 2)}
+
+## 判断ルール
+- 不適切、文脈不足、反応不要なものは replyAction=skip / quoteAction=skip。
+- 返信と引用RTは別軸で判断する。必要なら両方実行してよいが、過剰反応は避ける。
+- 相手の人物情報・memo・context・traitsを尊重する。
+- 相手の名前に言及する場合は candidates[].nickname だけを一字一句そのまま使う。displayName、username、authorNameを呼称として使わない。
+- nickname が空の場合は、相手を名前で呼ばない。
+- 元ツイートがある場合は、相手発言だけでなく元ツイート文脈も踏まえる。
+- 返信文・引用文は日本語で自然に。ハッシュタグ、チャンネルメンション、Discordコマンドは禁止。
+
+## 出力
+JSONだけを返してください。Markdownは禁止です。
+
+{
+  "items": [
+    {
+      "id": "m1",
+      "tweetLogId": "tweet_logs.id",
+      "postId": "相手ツイートID",
+      "username": "username",
+      "displayName": "表示名",
+      "type": "reply|quote|mention|tweet",
+      "body": "相手の本文",
+      "originalTweetId": "元ツイートID。なければ省略",
+      "originalTweetText": "元ツイート本文。なければ省略",
+      "replyAction": "reply|skip",
+      "quoteAction": "quote|skip",
+      "reason": "判断理由",
+      "replyText": "replyの場合のみ",
+      "quoteText": "quoteの場合のみ"
+    }
+  ]
+}`;
+
+  const result = await runJsonResult<{ items?: Partial<MentionReactionItem>[] }>(prompt);
+  return {
+    items: normalizeMentionItems(result.value?.items ?? [], input.candidates),
+    sessionId: result.sessionId,
+  };
+}
+
+export async function reviewAndReviseMentionReactionItem(input: {
+  item: MentionReactionItem;
+  candidate: MentionReactionCandidate;
+  replyMechanicalCheck?: MechanicalCheckResult;
+  quoteMechanicalCheck?: MechanicalCheckResult;
+  sessionId?: string;
+}): Promise<ReviewedMentionReactionItem> {
+  const reviewed = await reviewMentionReactionItem(input.item, input.candidate, input.sessionId);
+  const review = reviewed.review;
+  const reviewSessionId = reviewed.sessionId;
+  const mustRevise =
+    review.overall === 'NG' ||
+    input.replyMechanicalCheck?.ok === false ||
+    input.quoteMechanicalCheck?.ok === false;
+  if (!mustRevise) {
+    return {
+      ...input.item,
+      replyMechanicalCheck: input.replyMechanicalCheck,
+      quoteMechanicalCheck: input.quoteMechanicalCheck,
+      review,
+      revisionNotes: 'レビューOKのため修正なし',
+      reviewSessionId,
+    };
+  }
+
+  const prompt = `${MENTION_REACTION_RULES}
+
+あなたはAIニケちゃんのmention-reaction修正担当です。
+以下の反応案を、機械チェックとAIレビューを踏まえて修正してください。
+NGでも脱落させず、必要ならスキップ判断も含めて自然な反応案にしてください。
+
+## キャラクター設定
+${CHARACTER_BASE}
+
+${CHARACTER_TWITTER}
+
+## 候補ツイートと人物文脈
+${JSON.stringify(input.candidate, null, 2)}
+
+## 呼称ルール
+- 相手の名前に言及する場合は nickname だけを一字一句そのまま使う。
+- displayName、username、authorNameを呼称として使わない。
+- nickname が空の場合は、相手を名前で呼ばない。
+
+## 修正前の反応案
+${JSON.stringify(input.item, null, 2)}
+
+## 機械チェック
+${JSON.stringify(
+  {
+    reply: input.replyMechanicalCheck,
+    quote: input.quoteMechanicalCheck,
+  },
+  null,
+  2
+)}
+
+## AIレビュー
+${JSON.stringify(review, null, 2)}
+
+## 出力
+JSONだけを返してください。Markdownは禁止です。
+
+{
+  "id": "${input.item.id}",
+  "tweetLogId": "${input.item.tweetLogId}",
+  "postId": "${input.item.postId}",
+  "username": "${input.item.username}",
+  "displayName": "${input.item.displayName}",
+  "type": "${input.item.type}",
+  "body": "相手の本文",
+  "originalTweetId": "元ツイートID。なければ省略",
+  "originalTweetText": "元ツイート本文。なければ省略",
+  "replyAction": "reply|skip",
+  "quoteAction": "quote|skip",
+  "reason": "判断理由",
+  "replyText": "replyの場合のみ",
+  "quoteText": "quoteの場合のみ",
+  "revisionNotes": "何を直したか"
+}`;
+
+  const raw = await runJson<Partial<MentionReactionItem> & { revisionNotes?: string }>(
+    prompt,
+    reviewSessionId
+  );
+  const revised = normalizeMentionItems([raw], [input.candidate])[0];
+  if (!revised) throw new Error(`mention reaction revision produced empty item: ${input.item.id}`);
+  return {
+    ...revised,
+    replyMechanicalCheck: input.replyMechanicalCheck,
+    quoteMechanicalCheck: input.quoteMechanicalCheck,
+    review,
+    revisionNotes: raw.revisionNotes ?? 'レビュー結果に基づき修正',
+    reviewSessionId,
+  };
+}
+
+export async function interpretMasterMentionReactionReply(input: {
+  message: string;
+  pending: {
+    items: ReviewedMentionReactionItem[];
+    revisionCount: number;
+  };
+}): Promise<MasterMentionReactionDecision> {
+  const prompt = `あなたはAIニケちゃんのmention-reaction承認フロー制御担当です。
+マスターの返信を読み、投稿実行・修正・却下のどれかに分類してください。
+
+## マスターの返信
+${input.message}
+
+## 現在の候補
+${JSON.stringify(input.pending.items, null, 2)}
+
+## 修正回数
+${input.pending.revisionCount}
+
+## 判断ルール
+- 「OK」「承認」「投稿して」「リプして」「引用して」「全部OK」など投稿・スキップ判断を進める意図なら action=execute。
+- 「1だけ」「2と4」など番号指定があれば selectedItemIds に m1, m2 のように入れる。
+- 「1で良い」「3案で」「このまま」「それで」など、マスターが承認している場合は即実行する。承認後に再提示しない。
+- 「未対応」「スキップ」「反応しない」「そのままでOK」は、投稿せずスキップとして承認された扱いなので action=execute。
+- 明確に「却下」「見送り」「やめて」「キャンセル」「全部なし」と言っている場合だけ action=cancel。
+- 文体修正、個別修正、別案希望、短く、もっと柔らかく等、マスターが本文変更を求めている場合だけ action=revise。revise後は再提示して、次のマスター返信を待つ。
+- revise の場合、instruction にマスターの意図と対象候補を具体的に書く。
+- 今後も適用すべき口調・人物別対応・判断ルールが含まれていれば feedbackForFuture に短く書く。
+
+## 出力
+JSONだけを返してください。Markdownは禁止です。
+
+{
+  "action": "execute|revise|cancel",
+  "selectedItemIds": ["m1"],
+  "instruction": "修正指示。execute/cancelなら省略可",
+  "feedbackForFuture": "今後も適用するルール。なければ省略"
+}`;
+
+  const decision = await runJson<Partial<MasterMentionReactionDecision>>(prompt);
+  const action =
+    decision?.action === 'execute' || decision?.action === 'cancel' || decision?.action === 'revise'
+      ? decision.action
+      : 'revise';
+  const safeAction =
+    action === 'cancel' && !isExplicitMentionCancel(input.message) ? 'revise' : action;
+  return {
+    action: safeAction,
+    selectedItemIds: Array.isArray(decision?.selectedItemIds)
+      ? decision.selectedItemIds.map(String)
+      : undefined,
+    instruction: typeof decision?.instruction === 'string' ? decision.instruction : input.message,
+    feedbackForFuture:
+      typeof decision?.feedbackForFuture === 'string' ? decision.feedbackForFuture : undefined,
+  };
+}
+
+function isExplicitMentionCancel(message: string): boolean {
+  const normalized = message.replace(/[。、.!！?？\s]/g, '').trim();
+  return /^(却下|見送り|やめて|だめ|ダメ|no|ng|stop|キャンセル|全部なし|全てなし)$/i.test(
+    normalized
+  );
+}
+
+export async function reviseMentionReactionPlanFromMaster(input: {
+  instruction: string;
+  pending: {
+    items: ReviewedMentionReactionItem[];
+    candidates: MentionReactionCandidate[];
+  };
+  sessionId?: string;
+}): Promise<{ items: MentionReactionItem[]; sessionId?: string }> {
+  const prompt = `${MENTION_REACTION_RULES}
+
+あなたはAIニケちゃんのmention-reaction修正担当です。
+マスターの指示を、これまでの候補・人物文脈・レビュー文脈を保持したまま反映してください。
+
+## キャラクター設定
+${CHARACTER_BASE}
+
+${CHARACTER_TWITTER}
+
+## マスターの指示
+${input.instruction}
+
+## 元候補と人物文脈
+${JSON.stringify(input.pending.candidates, null, 2)}
+
+## 呼称ルール
+- 相手の名前に言及する場合は candidates[].nickname だけを一字一句そのまま使う。
+- displayName、username、authorNameを呼称として使わない。
+- nickname が空の場合は、相手を名前で呼ばない。
+
+## 現在の反応案とレビュー
+${JSON.stringify(input.pending.items, null, 2)}
+
+## 出力
+JSONだけを返してください。Markdownは禁止です。
+
+{
+  "items": [
+    {
+      "id": "m1",
+      "tweetLogId": "tweet_logs.id",
+      "postId": "相手ツイートID",
+      "username": "username",
+      "displayName": "表示名",
+      "type": "reply|quote|mention|tweet",
+      "body": "相手の本文",
+      "originalTweetId": "元ツイートID。なければ省略",
+      "originalTweetText": "元ツイート本文。なければ省略",
+      "replyAction": "reply|skip",
+      "quoteAction": "quote|skip",
+      "reason": "判断理由",
+      "replyText": "replyの場合のみ",
+      "quoteText": "quoteの場合のみ"
+    }
+  ]
+}`;
+
+  const result = await runJsonResult<{ items?: Partial<MentionReactionItem>[] }>(
+    prompt,
+    input.sessionId
+  );
+  return {
+    items: normalizeMentionItems(result.value?.items ?? [], input.pending.candidates),
+    sessionId: result.sessionId,
+  };
+}
+
+export async function decideMentionNickname(input: {
+  name: string;
+  displayName: string;
+  username: string;
+  bio?: string | null;
+  relationship?: string | null;
+  episodes?: string;
+}): Promise<string> {
+  const prompt = `以下の情報から、この人物のニックネーム（呼び方）を1つ決めてください。
+
+ルール:
+- デフォルトは「〇〇さん」形式（例: 鈴木 → 鈴木さん、lily → リリーさん）
+- 英語・アルファベット名の人は読みやすいカタカナに変換する（例: VORZEN → ヴォーゼンさん、stocktrading0 → ストックさん、darche2 → ダルシェさん）
+- エピソードの中で会話を通じて決まった呼び方があれば、それを最優先で採用する
+- 「さん」付けが基本。親しい関係（fan/friend）でも「さん」でよい
+- 短く呼びやすいものにする。長い名前は適度に省略する
+- エピソードがなくても name / displayName / username / bio から判断してよい
+
+人物: ${input.name || '（なし）'}
+表示名: ${input.displayName || '（なし）'}
+username: @${input.username || 'unknown'}
+bio: ${input.bio || '（なし）'}
+relationship: ${input.relationship || 'acquaintance'}
+
+エピソード（あれば）:
+${input.episodes || '（なし）'}
+
+出力: ニックネームのみ（例: リリーさん）`;
+
+  const raw = await runClaude(prompt);
+  return sanitizeNickname(raw.text);
+}
+
 export function sanitizeTweetText(text: string): string {
   return text
     .replace(/^["「]|["」]$/g, '')
@@ -443,6 +821,14 @@ export function sanitizeTweetText(text: string): string {
     .replace(/\n{3,}/g, '\n\n')
     .trim()
     .slice(0, 280);
+}
+
+function sanitizeNickname(raw: string): string {
+  return raw
+    .split('\n')[0]
+    .replace(/^["「『`]+|["」』`]+$/g, '')
+    .trim()
+    .slice(0, 40);
 }
 
 async function reviewSelfTweetDraft(
@@ -477,6 +863,83 @@ JSONだけを返してください。Markdownは禁止です。`;
     review: normalizeReview(result.value),
     sessionId: result.sessionId,
   };
+}
+
+async function reviewMentionReactionItem(
+  item: MentionReactionItem,
+  candidate: MentionReactionCandidate,
+  sessionId?: string
+): Promise<{ review: TweetReviewResult; sessionId?: string }> {
+  const texts = [
+    item.replyAction === 'reply' && item.replyText ? `返信案: ${item.replyText}` : '',
+    item.quoteAction === 'quote' && item.quoteText ? `引用RT案: ${item.quoteText}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const prompt = `${TWEET_REVIEW_RULES}
+
+## キャラクター設定
+${CHARACTER_BASE}
+
+${CHARACTER_TWITTER}
+
+## 元ツイート・人物文脈
+${JSON.stringify(candidate, null, 2)}
+
+## レビュー対象
+${texts || 'スキップ判定のみ'}
+
+## 判断理由
+${item.reason}
+
+JSONだけを返してください。Markdownは禁止です。`;
+
+  const result = await runJsonResult<Partial<TweetReviewResult>>(prompt, sessionId);
+  return {
+    review: normalizeReview(result.value),
+    sessionId: result.sessionId,
+  };
+}
+
+function normalizeMentionItems(
+  input: Array<Partial<MentionReactionItem> & { revisionNotes?: string }>,
+  candidates: MentionReactionCandidate[]
+): MentionReactionItem[] {
+  const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  const byTweetLogId = new Map(candidates.map((candidate) => [candidate.tweetLogId, candidate]));
+  const items: MentionReactionItem[] = [];
+  input.forEach((item, index) => {
+    const id = String(item.id || `m${index + 1}`);
+    const candidate = byTweetLogId.get(String(item.tweetLogId || '')) ?? byId.get(id);
+    const fallback = candidate ?? candidates[index];
+    if (!fallback) return;
+    const replyAction = item.replyAction === 'reply' && item.replyText ? 'reply' : 'skip';
+    const quoteAction = item.quoteAction === 'quote' && item.quoteText ? 'quote' : 'skip';
+    items.push({
+      id,
+      tweetLogId: String(item.tweetLogId || fallback.tweetLogId),
+      postId: String(item.postId || fallback.postId),
+      username: String(item.username || fallback.username),
+      displayName: String(item.displayName || fallback.displayName),
+      type: String(item.type || fallback.type),
+      body: String(item.body || fallback.body),
+      originalTweetId: item.originalTweetId
+        ? String(item.originalTweetId)
+        : fallback.originalTweetId,
+      originalTweetText: item.originalTweetText
+        ? String(item.originalTweetText)
+        : fallback.originalTweetText,
+      replyAction,
+      quoteAction,
+      reason: String(item.reason || 'AI判定'),
+      replyText:
+        replyAction === 'reply' ? sanitizeTweetText(String(item.replyText || '')) : undefined,
+      quoteText:
+        quoteAction === 'quote' ? sanitizeTweetText(String(item.quoteText || '')) : undefined,
+    });
+  });
+  return items.slice(0, 10);
 }
 
 function normalizeSourceCollection(
