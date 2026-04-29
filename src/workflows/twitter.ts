@@ -8,6 +8,7 @@ import {
   generateHashtagReactionPlan,
   generateSelfTweetDrafts,
   generateMentionReactionPlan,
+  generateMasterReplyInterpretationRecovery,
   interpretMasterMentionReactionReply,
   interpretMasterSelfTweetReply,
   reviewAndReviseMentionReactionItem,
@@ -238,9 +239,24 @@ export async function handleSelfTweetApproval(
     },
   }).catch(async (err) => {
     console.error('[twitter] master reply interpretation failed:', err);
-    const message = err instanceof Error ? err.message : String(err);
+    const message = formatErrorMessage(err);
+    await addTwitterActivityLog({
+      ...activityMeta(opts, runKey),
+      workflow: 'self-tweet',
+      stage: 'error',
+      raw_content: normalized,
+      parsed: { phase: 'interpret', error: message },
+    }).catch((logErr) => console.error('[twitter] interpretation error log failed:', logErr));
     await opts.setPhase?.('text');
-    await opts.sendReport(`⚠️ マスター返信の解釈に失敗しました: ${message.slice(0, 250)}`);
+    const recoveryReply = await generateMasterReplyInterpretationRecovery({
+      workflow: 'self-tweet',
+      message: normalized,
+      error: message,
+    }).catch((recoveryErr) => {
+      console.error('[twitter] interpretation recovery reply failed:', recoveryErr);
+      return null;
+    });
+    await opts.sendReport(recoveryReply || `⚠️ エラー: ${message.slice(0, 250)}`);
     return null;
   });
   if (!decision) return true;
@@ -472,9 +488,24 @@ export async function handleMentionReactionApproval(
     },
   }).catch(async (err) => {
     console.error('[twitter] mention reply interpretation failed:', err);
-    const message = err instanceof Error ? err.message : String(err);
+    const message = formatErrorMessage(err);
+    await addTwitterActivityLog({
+      ...activityMeta(opts, runKey),
+      workflow: 'mention-reaction',
+      stage: 'error',
+      raw_content: normalized,
+      parsed: { phase: 'interpret', error: message },
+    }).catch((logErr) => console.error('[twitter] interpretation error log failed:', logErr));
     await opts.setPhase?.('text');
-    await opts.sendReport(`⚠️ マスター返信の解釈に失敗しました: ${message.slice(0, 250)}`);
+    const recoveryReply = await generateMasterReplyInterpretationRecovery({
+      workflow: 'mention-reaction',
+      message: normalized,
+      error: message,
+    }).catch((recoveryErr) => {
+      console.error('[twitter] interpretation recovery reply failed:', recoveryErr);
+      return null;
+    });
+    await opts.sendReport(recoveryReply || `⚠️ エラー: ${message.slice(0, 250)}`);
     return null;
   });
   if (!decision) return true;
@@ -2146,4 +2177,8 @@ async function loadState(): Promise<TwitterWorkflowState> {
 async function saveState(state: TwitterWorkflowState): Promise<void> {
   await mkdir(dirname(STATE_PATH), { recursive: true });
   await writeFile(STATE_PATH, JSON.stringify(state, null, 2));
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

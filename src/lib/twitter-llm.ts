@@ -740,6 +740,45 @@ JSONだけを返してください。Markdownは禁止です。
   };
 }
 
+export async function generateMasterReplyInterpretationRecovery(input: {
+  workflow: 'self-tweet' | 'mention-reaction';
+  message: string;
+  error: string;
+}): Promise<string> {
+  const workflowLabel = input.workflow === 'self-tweet' ? '自発ツイート' : 'メンション反応';
+  const prompt = `${CHARACTER_BASE}
+
+${CHARACTER_TWITTER}
+
+あなたはAIニケちゃんです。
+${workflowLabel}の承認スレッドで、マスターの返信を処理しようとしましたが、一時的に処理が完了しませんでした。
+
+## マスターの返信
+${input.message}
+
+## 内部エラー
+${input.error}
+
+## 返答ルール
+- 機械的なエラー文、スタックトレース、内部関数名は出さない。
+- マスターの返信内容を勝手に承認・却下・修正として処理したことにしない。
+- 承認待ちの状態は維持されている前提で、マスターに短く自然に返す。
+- 本文は1〜2文。丁寧語。絵文字は使わない。
+- 「もう一度同じ内容を送ってください」とだけ言うのではなく、状況に合う自然な言い方にする。
+
+## 出力
+JSONだけを返してください。Markdownは禁止です。
+
+{
+  "message": "Discordに返す短い本文"
+}`;
+
+  const response = await runJson<{ message?: string }>(prompt);
+  const message = String(response?.message || '').trim();
+  if (!message) throw new Error('recovery reply is empty');
+  return message.slice(0, 500);
+}
+
 export async function reviseMentionReactionPlanFromMaster(input: {
   instruction: string;
   pending: {
