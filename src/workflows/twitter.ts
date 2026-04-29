@@ -8,6 +8,7 @@ import {
   generateHashtagReactionPlan,
   generateSelfTweetDrafts,
   generateMentionReactionPlan,
+  generateClosedTwitterWorkflowReply,
   generateMasterReplyInterpretationRecovery,
   interpretMasterMentionReactionReply,
   interpretMasterSelfTweetReply,
@@ -366,7 +367,18 @@ async function handleClosedSelfTweetApproval(
   if (!closed) return false;
 
   await opts.setPhase?.('text');
-  await opts.sendReport('このスレッドの自発ツイート承認待ちは既に終了しています。');
+  try {
+    const reply = await generateClosedTwitterWorkflowReply({
+      workflow: 'self-tweet',
+      message: normalized,
+      reason: closed.reason,
+      closedAt: closed.closedAt,
+    });
+    await opts.sendReport(reply);
+  } catch (err) {
+    console.error('[twitter] closed self-tweet reply generation failed:', err);
+    await opts.sendReport(`⚠️ エラー: ${formatErrorMessage(err).slice(0, 250)}`);
+  }
   return true;
 }
 
@@ -612,7 +624,18 @@ async function handleClosedMentionReactionApproval(
   if (!closed) return false;
 
   await opts.setPhase?.('text');
-  await opts.sendReport('このスレッドのメンション反応承認待ちは既に終了しています。');
+  try {
+    const reply = await generateClosedTwitterWorkflowReply({
+      workflow: 'mention-reaction',
+      message: normalized,
+      reason: closed.reason,
+      closedAt: closed.closedAt,
+    });
+    await opts.sendReport(reply);
+  } catch (err) {
+    console.error('[twitter] closed mention-reaction reply generation failed:', err);
+    await opts.sendReport(`⚠️ エラー: ${formatErrorMessage(err).slice(0, 250)}`);
+  }
   return true;
 }
 
