@@ -864,54 +864,6 @@ JSONだけを返してください。Markdownは禁止です。
   return message.slice(0, 500);
 }
 
-export async function generateClosedTwitterWorkflowReply(input: {
-  workflow: 'self-tweet' | 'mention-reaction';
-  message: string;
-  reason: 'executed' | 'cancelled' | 'manual';
-  closedAt: string;
-}): Promise<string> {
-  const workflowLabel = input.workflow === 'self-tweet' ? '自発ツイート' : 'メンション反応';
-  const reasonLabel =
-    input.reason === 'executed'
-      ? '投稿実行済み'
-      : input.reason === 'cancelled'
-        ? '見送り済み'
-        : '手動終了済み';
-  const prompt = `${CHARACTER_BASE}
-
-${CHARACTER_TWITTER}
-
-あなたはAIニケちゃんです。
-${workflowLabel}の承認スレッドで、マスターから追加の返信が来ました。
-ただし、このワークフローの承認待ちは既に終了しています。
-
-## マスターの返信
-${input.message}
-
-## 終了状態
-- 理由: ${reasonLabel}
-- 終了時刻: ${input.closedAt}
-
-## 返答ルール
-- 固定文やシステム通知っぽい言い方にしない。
-- 承認待ちが終わっていることを、自然な会話として短く伝える。
-- マスターの返信に軽く反応してよいが、投稿済み/見送り済みの結果を勝手に変えない。
-- 再実行が必要そうなら、新しいワークフローで扱う必要があると自然に伝える。
-- 本文は1〜2文。丁寧語。絵文字は使わない。
-
-## 出力
-JSONだけを返してください。Markdownは禁止です。
-
-{
-  "message": "Discordに返す短い本文"
-}`;
-
-  const response = await runJson<{ message?: string }>(prompt);
-  const message = String(response?.message || '').trim();
-  if (!message) throw new Error('closed workflow reply is empty');
-  return message.slice(0, 500);
-}
-
 export async function reviseMentionReactionPlanFromMaster(input: {
   instruction: string;
   pending: {

@@ -8,7 +8,6 @@ import {
   generateHashtagReactionPlan,
   generateSelfTweetDrafts,
   generateMentionReactionPlan,
-  generateClosedTwitterWorkflowReply,
   generateMasterReplyInterpretationRecovery,
   interpretMasterMentionReactionReply,
   interpretMasterSelfTweetReply,
@@ -224,7 +223,7 @@ export async function handleSelfTweetApproval(
 
   const pending = await getPendingSelfTweet(channelId);
   if (!pending) {
-    return handleClosedSelfTweetApproval(prompt, opts);
+    return false;
   }
   const runKey = `twitter:self-tweet:${channelId}`;
 
@@ -369,34 +368,6 @@ export async function handleSelfTweetApproval(
   return true;
 }
 
-async function handleClosedSelfTweetApproval(
-  prompt: string,
-  opts: TwitterWorkflowOptions
-): Promise<boolean> {
-  const channelId = opts.channelId;
-  if (!channelId) return false;
-  const normalized = prompt.trim();
-  if (!normalized || normalized.startsWith('/')) return false;
-
-  const closed = await getClosedSelfTweet(channelId);
-  if (!closed) return false;
-
-  await opts.setPhase?.('text');
-  try {
-    const reply = await generateClosedTwitterWorkflowReply({
-      workflow: 'self-tweet',
-      message: normalized,
-      reason: closed.reason,
-      closedAt: closed.closedAt,
-    });
-    await opts.sendReport(reply);
-  } catch (err) {
-    console.error('[twitter] closed self-tweet reply generation failed:', err);
-    await opts.sendReport(`⚠️ エラー: ${formatErrorMessage(err).slice(0, 250)}`);
-  }
-  return true;
-}
-
 export async function runMentionReactionWorkflow(opts: TwitterWorkflowOptions): Promise<void> {
   const channelId = opts.channelId;
   if (!channelId) throw new Error('channelId is required for mention-reaction workflow');
@@ -499,7 +470,7 @@ export async function handleMentionReactionApproval(
 
   const pending = await getPendingMentionReaction(channelId);
   if (!pending) {
-    return handleClosedMentionReactionApproval(prompt, opts);
+    return false;
   }
   const runKey = `twitter:mention-reaction:${channelId}`;
 
@@ -623,34 +594,6 @@ export async function handleMentionReactionApproval(
     await opts.sendReport(`⚠️ 修正版の生成に失敗しました: ${message.slice(0, 250)}`);
   }
 
-  return true;
-}
-
-async function handleClosedMentionReactionApproval(
-  prompt: string,
-  opts: TwitterWorkflowOptions
-): Promise<boolean> {
-  const channelId = opts.channelId;
-  if (!channelId) return false;
-  const normalized = prompt.trim();
-  if (!normalized || normalized.startsWith('/')) return false;
-
-  const closed = await getClosedMentionReaction(channelId);
-  if (!closed) return false;
-
-  await opts.setPhase?.('text');
-  try {
-    const reply = await generateClosedTwitterWorkflowReply({
-      workflow: 'mention-reaction',
-      message: normalized,
-      reason: closed.reason,
-      closedAt: closed.closedAt,
-    });
-    await opts.sendReport(reply);
-  } catch (err) {
-    console.error('[twitter] closed mention-reaction reply generation failed:', err);
-    await opts.sendReport(`⚠️ エラー: ${formatErrorMessage(err).slice(0, 250)}`);
-  }
   return true;
 }
 
@@ -2212,11 +2155,6 @@ async function savePendingSelfTweet(channelId: string, pending: PendingSelfTweet
   await saveState(state);
 }
 
-async function getClosedSelfTweet(channelId: string): Promise<ClosedWorkflowChannel | null> {
-  const state = await loadState();
-  return state.closedSelfTweets[channelId] ?? null;
-}
-
 async function clearPendingSelfTweet(
   channelId: string,
   reason: ClosedWorkflowChannel['reason']
@@ -2245,11 +2183,6 @@ async function savePendingMentionReaction(
   state.pendingMentionReactions[channelId] = pending;
   delete state.closedMentionReactions[channelId];
   await saveState(state);
-}
-
-async function getClosedMentionReaction(channelId: string): Promise<ClosedWorkflowChannel | null> {
-  const state = await loadState();
-  return state.closedMentionReactions[channelId] ?? null;
 }
 
 async function clearPendingMentionReaction(
