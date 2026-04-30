@@ -23,6 +23,7 @@ import {
   emptyElythPlan,
   getCandidateById,
   validateElythPlan,
+  type ElythPlan,
   type ElythPostCandidate,
   type ElythValidatedPlan,
 } from '../lib/elyth-guards.js';
@@ -37,6 +38,7 @@ export interface ElythSentReport {
 
 export interface ElythWorkflowOptions {
   sendReport: (text: string) => Promise<ElythSentReport | void>;
+  bindSession?: (sessionId: string, reason: string) => Promise<void> | void;
   messageId?: string;
   channelId?: string;
   authorId?: string;
@@ -82,7 +84,7 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
       todayTopic: candidates.todayTopic,
       worldContext,
       myPostsText,
-    }).catch((e) => {
+    }).catch((e): import('../lib/elyth-llm.js').ElythSelfPostSourceCollection => {
       console.error('[elyth] self-post source collection failed:', e);
       return {
         summary: `自発投稿ソース収集失敗: ${errorMessage(e)}`,
@@ -91,6 +93,7 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
         recentPatternNotes: '',
       };
     });
+    await bindWorkflowSession(opts, selfPostSourceCollection.sessionId, 'elyth:source-collector');
 
     const fetchLog = await addElythActivityLog({
       discord_message_id: opts.messageId,
@@ -121,7 +124,7 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
       return null;
     });
 
-    const plan = await decideElythPlan({
+    const plan: ElythPlan & { sessionId?: string } = await decideElythPlan({
       emotionText,
       personContext,
       notifications: candidates.notifications,
@@ -131,10 +134,12 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
       humanNotificationsText,
       myPostsText,
       selfPostSourceCollection,
+      sessionId: selfPostSourceCollection.sessionId,
     }).catch((e) => {
       console.error('[elyth] LLM plan failed:', e);
       return emptyElythPlan();
     });
+    await bindWorkflowSession(opts, plan.sessionId, 'elyth:plan');
 
     const validated = validateElythPlan(plan, [
       ...candidates.notifications,
@@ -216,6 +221,15 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
   } finally {
     await mcp.close().catch(() => {});
   }
+}
+
+async function bindWorkflowSession(
+  opts: ElythWorkflowOptions,
+  sessionId: string | undefined,
+  reason: string
+): Promise<void> {
+  if (!sessionId) return;
+  await opts.bindSession?.(sessionId, reason);
 }
 
 async function collectRawSelfPostSourceData(): Promise<string> {

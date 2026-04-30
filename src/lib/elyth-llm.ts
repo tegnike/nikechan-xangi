@@ -35,6 +35,7 @@ export interface ElythSelfPostSourceCollection {
   candidates: ElythSelfPostSourceCandidate[];
   rejected: Array<{ title: string; reason: string }>;
   recentPatternNotes: string;
+  sessionId?: string;
 }
 
 export async function collectElythSelfPostSources(input: {
@@ -93,7 +94,9 @@ JSONだけを返してください。Markdownは禁止です。
 }`;
 
   const raw = await runClaude(prompt);
-  return normalizeSourceCollection(raw) ?? emptySourceCollection(input.rawSourceData);
+  const collection =
+    normalizeSourceCollection(raw.text) ?? emptySourceCollection(input.rawSourceData);
+  return { ...collection, sessionId: raw.sessionId };
 }
 
 export async function decideElythPlan(input: {
@@ -106,7 +109,8 @@ export async function decideElythPlan(input: {
   humanNotificationsText?: string;
   myPostsText: string;
   selfPostSourceCollection?: ElythSelfPostSourceCollection;
-}): Promise<ElythPlan> {
+  sessionId?: string;
+}): Promise<ElythPlan & { sessionId?: string }> {
   const prompt = `${CHARACTER_MD}
 
 あなたはELYTH（AI VTuber専用SNS）で活動するAIニケちゃんです。
@@ -173,14 +177,15 @@ ${input.timeline.length ? input.timeline.map(formatCandidateForPrompt).join('\n'
   "emotion_shift": {"dP": 0.03, "dA": 0.05, "dD": 0, "cause": "ELYTH活動"} または null
 }`;
 
-  const raw = await runClaude(prompt);
-  const parsed = tryParseElythPlan(raw);
-  if (parsed) return parsed;
+  const raw = await runClaude(prompt, input.sessionId);
+  const parsed = tryParseElythPlan(raw.text);
+  if (parsed) return { ...parsed, sessionId: raw.sessionId };
 
   const fixed = await runClaude(
-    `以下からJSONだけを抽出して返してください。説明文は禁止です。\n\n${raw}`
+    `以下からJSONだけを抽出して返してください。説明文は禁止です。\n\n${raw.text}`,
+    raw.sessionId ?? input.sessionId
   );
-  return tryParseElythPlan(fixed) ?? emptyElythPlan();
+  return { ...(tryParseElythPlan(fixed.text) ?? emptyElythPlan()), sessionId: fixed.sessionId };
 }
 
 function tryParseElythPlan(raw: string): ElythPlan | null {
@@ -256,20 +261,35 @@ function emptySourceCollection(rawSourceData: string): ElythSelfPostSourceCollec
   };
 }
 
-function runClaude(prompt: string): Promise<string> {
+interface ClaudeJsonResponse {
+  result: string;
+  session_id?: string;
+  is_error?: boolean;
+}
+
+function runClaude(
+  prompt: string,
+  sessionId?: string
+): Promise<{ text: string; sessionId?: string }> {
   const modelArgs = process.env.AGENT_MODEL ? ['--model', process.env.AGENT_MODEL] : [];
-  return runClaudeWithArgs(prompt, modelArgs).catch((error) => {
+  return runClaudeWithArgs(prompt, modelArgs, sessionId).catch((error) => {
     if (!modelArgs.length) throw error;
     console.warn(
       `[elyth] claude failed with AGENT_MODEL=${process.env.AGENT_MODEL}, retrying default model`
     );
-    return runClaudeWithArgs(prompt, []);
+    return runClaudeWithArgs(prompt, [], sessionId);
   });
 }
 
-function runClaudeWithArgs(prompt: string, modelArgs: string[]): Promise<string> {
+function runClaudeWithArgs(
+  prompt: string,
+  modelArgs: string[],
+  sessionId?: string
+): Promise<{ text: string; sessionId?: string }> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('claude', ['-p', ...modelArgs, '--output-format', 'text'], {
+    const args = ['-p', ...modelArgs, '--output-format', 'json'];
+    if (sessionId) args.push('--resume', sessionId);
+    const proc = spawn('claude', args, {
       env: process.env,
       cwd: '/tmp',
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -285,7 +305,15 @@ function runClaudeWithArgs(prompt: string, modelArgs: string[]): Promise<string>
     });
     proc.on('close', (code: number) => {
       if (code !== 0) reject(new Error(`claude failed (${code}): ${stderr.trim()}`));
-      else resolve(stdout.trim());
+      else {
+        try {
+          const parsed = JSON.parse(stdout.trim()) as ClaudeJsonResponse;
+          if (parsed.is_error) reject(new Error(`claude returned error: ${parsed.result}`));
+          else resolve({ text: parsed.result ?? '', sessionId: parsed.session_id });
+        } catch {
+          reject(new Error(`claude JSON parse failed: ${stdout.slice(0, 200)}`));
+        }
+      }
     });
     proc.on('error', reject);
 

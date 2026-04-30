@@ -6,7 +6,9 @@ import {
   collectSelfTweetSourcesWithAI,
   decideMentionNickname,
   generateHashtagReactionPlan,
+  generateMentionReactionCompletionReply,
   generateSelfTweetDrafts,
+  generateSelfTweetCompletionReply,
   generateMentionReactionPlan,
   generateMasterReplyInterpretationRecovery,
   interpretMasterMentionReactionReply,
@@ -43,6 +45,7 @@ export interface TwitterSentReport {
 
 export interface TwitterWorkflowOptions {
   sendReport: (text: string) => Promise<TwitterSentReport | void>;
+  bindSession?: (sessionId: string, reason: string) => Promise<void> | void;
   setPhase?: (phase: 'thinking' | 'tool_use' | 'text') => Promise<void> | void;
   messageId?: string;
   channelId?: string;
@@ -117,6 +120,7 @@ export async function runSelfTweetWorkflow(opts: TwitterWorkflowOptions): Promis
   try {
     await opts.setPhase?.('thinking');
     const pending = await createPendingSelfTweet(channelId, 0);
+    await bindWorkflowSession(opts, pending.draftGenerationSessionId, 'self-tweet:draft');
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
       workflow: 'self-tweet',
@@ -221,7 +225,7 @@ export async function handleSelfTweetApproval(
   const channelId = opts.channelId;
   if (!channelId) return false;
 
-  const pending = await getPendingSelfTweet(channelId);
+  let pending = await getPendingSelfTweet(channelId);
   if (!pending) {
     return false;
   }
@@ -238,6 +242,7 @@ export async function handleSelfTweetApproval(
       drafts: pending.drafts,
       revisionCount: pending.revisionCount,
     },
+    sessionId: pending.draftGenerationSessionId,
   }).catch(async (err) => {
     console.error('[twitter] master reply interpretation failed:', err);
     const message = formatErrorMessage(err);
@@ -261,6 +266,10 @@ export async function handleSelfTweetApproval(
     return null;
   });
   if (!decision) return true;
+  if (decision.sessionId) {
+    pending = { ...pending, draftGenerationSessionId: decision.sessionId };
+    await bindWorkflowSession(opts, decision.sessionId, 'self-tweet:interpret');
+  }
   await addTwitterActivityLog({
     ...activityMeta(opts, runKey),
     workflow: 'self-tweet',
@@ -286,7 +295,7 @@ export async function handleSelfTweetApproval(
   if (decision.action === 'post') {
     const draft = selectDraft(pending, decision.selectedDraftId);
     await opts.setPhase?.('tool_use');
-    await publishSelectedSelfTweet(draft, opts);
+    const postResult = await publishSelectedSelfTweet(draft, opts);
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
       workflow: 'self-tweet',
@@ -297,6 +306,7 @@ export async function handleSelfTweetApproval(
         dry_run: isTwitterWorkflowDryRun(),
         selected_draft_id: draft.id,
         topic: draft.topic,
+        result: postResult,
       },
     });
     if (!isTwitterWorkflowDryRun()) {
@@ -311,6 +321,41 @@ export async function handleSelfTweetApproval(
       topic: draft.topic,
       source_candidate_ids: draft.sourceCandidateIds,
     });
+    await opts.setPhase?.('text');
+    const completion = await generateSelfTweetCompletionReply({
+      masterMessage: normalized,
+      draft,
+      result: postResult,
+      dryRun: isTwitterWorkflowDryRun(),
+      sessionId: pending.draftGenerationSessionId,
+    }).catch((err) => {
+      console.error('[twitter] self-tweet completion reply failed:', err);
+      return null;
+    });
+    if (completion?.sessionId) {
+      await bindWorkflowSession(opts, completion.sessionId, 'self-tweet:completion');
+    }
+    await opts.sendReport(
+      completion?.message ||
+        `${isTwitterWorkflowDryRun() ? '投稿予定を確認しました。' : '投稿まで完了しました。'}\n${postResult || '（投稿結果のURL取得なし）'}`
+    );
+    return true;
+  }
+
+  if (decision.action === 'chat') {
+    await addTwitterActivityLog({
+      ...activityMeta(opts, runKey),
+      workflow: 'self-tweet',
+      stage: 'chat',
+      raw_content: normalized,
+      parsed: { response: decision.responseMessage, drafts: pending.drafts },
+    });
+    await savePendingSelfTweet(channelId, pending);
+    await opts.setPhase?.('text');
+    await opts.sendReport(
+      decision.responseMessage ||
+        'はい、確認です。承認待ちはそのまま残しているので、投稿する場合はあらためて番号を指定してください。'
+    );
     return true;
   }
 
@@ -342,6 +387,7 @@ export async function handleSelfTweetApproval(
       decision.instruction || normalized,
       decision.selectedDraftId
     );
+    await bindWorkflowSession(opts, revised.draftGenerationSessionId, 'self-tweet:revise');
     await savePendingSelfTweet(channelId, revised);
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
@@ -398,6 +444,7 @@ export async function runMentionReactionWorkflow(opts: TwitterWorkflowOptions): 
       });
       return;
     }
+    await bindWorkflowSession(opts, pending.planGenerationSessionId, 'mention-reaction:plan');
 
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
@@ -476,7 +523,7 @@ export async function handleMentionReactionApproval(
   const channelId = opts.channelId;
   if (!channelId) return false;
 
-  const pending = await getPendingMentionReaction(channelId);
+  let pending = await getPendingMentionReaction(channelId);
   if (!pending) {
     return false;
   }
@@ -492,6 +539,7 @@ export async function handleMentionReactionApproval(
       items: pending.items,
       revisionCount: pending.revisionCount,
     },
+    sessionId: pending.planGenerationSessionId,
   }).catch(async (err) => {
     console.error('[twitter] mention reply interpretation failed:', err);
     const message = formatErrorMessage(err);
@@ -515,6 +563,10 @@ export async function handleMentionReactionApproval(
     return null;
   });
   if (!decision) return true;
+  if (decision.sessionId) {
+    pending = { ...pending, planGenerationSessionId: decision.sessionId };
+    await bindWorkflowSession(opts, decision.sessionId, 'mention-reaction:interpret');
+  }
   await addTwitterActivityLog({
     ...activityMeta(opts, runKey),
     workflow: 'mention-reaction',
@@ -540,7 +592,7 @@ export async function handleMentionReactionApproval(
   if (decision.action === 'execute') {
     const items = selectMentionItems(pending, decision.selectedItemIds);
     await opts.setPhase?.('tool_use');
-    const result = await executeMentionReactions(items, pending, opts);
+    const result = await executeMentionReactions(items, pending);
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
       workflow: 'mention-reaction',
@@ -554,6 +606,44 @@ export async function handleMentionReactionApproval(
       summary: result.summary,
       item_ids: items.map((item) => item.id),
     });
+    await opts.setPhase?.('text');
+    const completion = await generateMentionReactionCompletionReply({
+      masterMessage: normalized,
+      items,
+      summary: result.summary,
+      results: result.results,
+      dryRun: isTwitterWorkflowDryRun(),
+      sessionId: pending.planGenerationSessionId,
+    }).catch((err) => {
+      console.error('[twitter] mention completion reply failed:', err);
+      return null;
+    });
+    if (completion?.sessionId) {
+      await bindWorkflowSession(opts, completion.sessionId, 'mention-reaction:completion');
+    }
+    const urls = result.results
+      .flatMap((entry) => [entry.reply_url, entry.quote_url].filter(Boolean))
+      .join('\n');
+    await opts.sendReport(
+      completion?.message || `処理しました。\n${result.summary}${urls ? `\n\n${urls}` : ''}`
+    );
+    return true;
+  }
+
+  if (decision.action === 'chat') {
+    await addTwitterActivityLog({
+      ...activityMeta(opts, runKey),
+      workflow: 'mention-reaction',
+      stage: 'chat',
+      raw_content: normalized,
+      parsed: { response: decision.responseMessage, items: pending.items },
+    });
+    await savePendingMentionReaction(channelId, pending);
+    await opts.setPhase?.('text');
+    await opts.sendReport(
+      decision.responseMessage ||
+        'はい、確認です。承認待ちはそのまま残しているので、実行する場合はあらためて指示してください。'
+    );
     return true;
   }
 
@@ -581,6 +671,7 @@ export async function handleMentionReactionApproval(
       pending,
       decision.instruction || normalized
     );
+    await bindWorkflowSession(opts, revised.planGenerationSessionId, 'mention-reaction:revise');
     await savePendingMentionReaction(channelId, revised);
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
@@ -640,7 +731,9 @@ export async function runHashtagReactionWorkflow(opts: TwitterWorkflowOptions): 
       parsed: { candidates, emotion_text: emotionText },
     });
 
-    const items = await generateHashtagReactionPlan({ emotionText, candidates });
+    const planned = await generateHashtagReactionPlan({ emotionText, candidates });
+    const items = planned.items;
+    await bindWorkflowSession(opts, planned.sessionId, 'hashtag-reaction:plan');
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
       workflow: 'hashtag-reaction',
@@ -1119,8 +1212,7 @@ function selectMentionItems(
 
 async function executeMentionReactions(
   items: ReviewedMentionReactionItem[],
-  pending: PendingMentionReaction,
-  opts: TwitterWorkflowOptions
+  pending: PendingMentionReaction
 ): Promise<{
   summary: string;
   results: Array<{
@@ -1216,11 +1308,6 @@ async function executeMentionReactions(
   if (!isTwitterWorkflowDryRun()) {
     await recordTwitterLocalEpisode(`mention-reactionを実行。${summary}`);
   }
-  const urls = results
-    .flatMap((result) => [result.reply_url, result.quote_url].filter(Boolean))
-    .join('\n');
-  await opts.setPhase?.('text');
-  await opts.sendReport(`メンション反応を処理しました。\n${summary}${urls ? `\n\n${urls}` : ''}`);
   return { summary, results };
 }
 
@@ -1658,14 +1745,10 @@ async function runMechanicalChecks(
 async function publishSelectedSelfTweet(
   draft: ReviewedSelfTweetDraft,
   opts: TwitterWorkflowOptions
-): Promise<void> {
+): Promise<string> {
   const text = draft.mechanicalCheck.checkedText || draft.text;
   if (isTwitterWorkflowDryRun()) {
-    await opts.setPhase?.('text');
-    await opts.sendReport(
-      `TWITTER_WORKFLOW_DRY_RUN=true のため投稿は実行しません。\n\n予定本文:\n「${text}」`
-    );
-    return;
+    return `TWITTER_WORKFLOW_DRY_RUN=true のため投稿は実行しません。\n\n予定本文:\n「${text}」`;
   }
   const skillRunEnv = await ensureSelfTweetSkillRunForPosting(opts.channelId);
   const result = await runTwitterPost(['tweet', text, 'self-tweet'], skillRunEnv);
@@ -1676,8 +1759,7 @@ async function publishSelectedSelfTweet(
   await recordEmotionShift(0.05, 0.05, 0, 'self-tweet', 'ツイート投稿成功', draft.topic).catch(
     (e) => console.error('[twitter] emotion-shift failed:', e)
   );
-  await opts.setPhase?.('text');
-  await opts.sendReport(`投稿しました。\n${result || '（投稿結果のURL取得なし）'}`);
+  return result || '（投稿結果のURL取得なし）';
 }
 
 function isTwitterWorkflowDryRun(): boolean {
@@ -1818,6 +1900,15 @@ async function recordTwitterLocalEpisode(content: string): Promise<void> {
   );
 }
 
+async function bindWorkflowSession(
+  opts: TwitterWorkflowOptions,
+  sessionId: string | undefined,
+  reason: string
+): Promise<void> {
+  if (!sessionId) return;
+  await opts.bindSession?.(sessionId, reason);
+}
+
 interface TwitterActivityLogInput {
   discord_message_id?: string;
   channel_id?: string;
@@ -1837,6 +1928,7 @@ interface TwitterActivityLogInput {
     | 'revise'
     | 'execute'
     | 'cancel'
+    | 'chat'
     | 'feedback'
     | 'error';
   raw_content: string;

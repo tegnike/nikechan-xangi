@@ -90,16 +90,31 @@ function buildDiscordReportSender(
       }
     }
     return {
-      messageId: sent.id,
-      channelId: sent.channel.id,
-      authorId: sent.author.id,
-      authorName: sent.author.username,
-      createdAt: sent.createdAt.toISOString(),
+      ...sentMessageReport(sent),
     };
   };
 }
 
 type WorkflowPhase = 'thinking' | 'tool_use' | 'text';
+
+interface WorkflowSentReport {
+  messageId?: string;
+  channelId?: string;
+  authorId?: string;
+  authorName?: string;
+  createdAt?: string;
+}
+
+interface DirectWorkflowContext {
+  channelId: string;
+  messageId?: string;
+  authorId?: string;
+  authorName?: string;
+  messageCreatedAt?: string;
+  sendReport: (text: string) => Promise<WorkflowSentReport | void>;
+  bindSession?: (sessionId: string, reason: string) => Promise<void> | void;
+  setPhase?: (phase: WorkflowPhase) => Promise<void> | void;
+}
 
 function createWorkflowReactionReporter(message: Message): {
   setPhase: (phase: WorkflowPhase) => Promise<void>;
@@ -140,6 +155,88 @@ function createWorkflowReactionReporter(message: Message): {
       currentPhaseEmoji = null;
     },
   };
+}
+
+function sentMessageReport(sent: Message): WorkflowSentReport {
+  return {
+    messageId: sent.id,
+    channelId: sent.channel.id,
+    authorId: sent.author.id,
+    authorName: sent.author.username,
+    createdAt: sent.createdAt.toISOString(),
+  };
+}
+
+function buildChannelWorkflowReportSender(
+  channel: { send: (content: string) => Promise<Message> },
+  onText?: (text: string) => void
+): (text: string) => Promise<WorkflowSentReport> {
+  return async (text: string) => {
+    onText?.(text);
+    const sent = await channel.send(text);
+    return sentMessageReport(sent);
+  };
+}
+
+async function runDirectWorkflow(
+  prompt: string,
+  context: DirectWorkflowContext,
+  options: { handleApprovals?: boolean } = {}
+): Promise<boolean> {
+  const handleApprovals = options.handleApprovals ?? true;
+
+  if (handleApprovals) {
+    const handledSelfTweetApproval = await handleSelfTweetApproval(prompt, {
+      ...context,
+      setPhase: context.setPhase,
+    });
+    if (handledSelfTweetApproval) return true;
+
+    const handledMentionReactionApproval = await handleMentionReactionApproval(prompt, {
+      ...context,
+      setPhase: context.setPhase,
+    });
+    if (handledMentionReactionApproval) return true;
+  }
+
+  if (isSelfTweetWorkflowPrompt(prompt)) {
+    await runSelfTweetWorkflow({
+      ...context,
+      setPhase: context.setPhase,
+    });
+    return true;
+  }
+
+  if (isMentionReactionWorkflowPrompt(prompt)) {
+    await runMentionReactionWorkflow({
+      ...context,
+      setPhase: context.setPhase,
+    });
+    return true;
+  }
+
+  if (isHashtagReactionWorkflowPrompt(prompt)) {
+    await runHashtagReactionWorkflow({
+      ...context,
+      setPhase: context.setPhase,
+    });
+    return true;
+  }
+
+  if (isElythWorkflowPrompt(prompt)) {
+    await runElythWorkflow({
+      messageId: context.messageId,
+      channelId: context.channelId,
+      authorId: context.authorId,
+      authorName: context.authorName,
+      messageCreatedAt: context.messageCreatedAt,
+      sendReport: context.sendReport,
+      bindSession: context.bindSession,
+    });
+    return true;
+  }
+
+  return false;
 }
 
 async function main() {
@@ -643,6 +740,12 @@ async function main() {
           message,
           config.discord.channelReports?.[channelId]
         );
+        const bindWorkflowSession = async (sessionId: string, reason: string) => {
+          setSession(channelId, sessionId);
+          console.log(
+            `[xangi] Bound workflow session ${sessionId.slice(0, 8)}... to channel ${channelId} (${reason})`
+          );
+        };
         const workflowReactions = createWorkflowReactionReporter(message);
         const withWorkflowReactions = async <T>(fn: () => Promise<T>): Promise<T> => {
           try {
@@ -652,88 +755,19 @@ async function main() {
           }
         };
 
-        const handledSelfTweetApproval = await withWorkflowReactions(() =>
-          handleSelfTweetApproval(prompt, {
+        const handledDirectWorkflow = await withWorkflowReactions(() =>
+          runDirectWorkflow(prompt, {
             messageId: message.id,
             channelId: message.channel.id,
             authorId: message.author.id,
             authorName: message.author.username,
             messageCreatedAt: message.createdAt.toISOString(),
             sendReport: sendWorkflowReport,
+            bindSession: bindWorkflowSession,
             setPhase: workflowReactions.setPhase,
           })
         );
-        if (handledSelfTweetApproval) return;
-
-        const handledMentionReactionApproval = await withWorkflowReactions(() =>
-          handleMentionReactionApproval(prompt, {
-            messageId: message.id,
-            channelId: message.channel.id,
-            authorId: message.author.id,
-            authorName: message.author.username,
-            messageCreatedAt: message.createdAt.toISOString(),
-            sendReport: sendWorkflowReport,
-            setPhase: workflowReactions.setPhase,
-          })
-        );
-        if (handledMentionReactionApproval) return;
-
-        if (isSelfTweetWorkflowPrompt(prompt)) {
-          await withWorkflowReactions(() =>
-            runSelfTweetWorkflow({
-              messageId: message.id,
-              channelId: message.channel.id,
-              authorId: message.author.id,
-              authorName: message.author.username,
-              messageCreatedAt: message.createdAt.toISOString(),
-              sendReport: sendWorkflowReport,
-              setPhase: workflowReactions.setPhase,
-            })
-          );
-          return;
-        }
-
-        if (isMentionReactionWorkflowPrompt(prompt)) {
-          await withWorkflowReactions(() =>
-            runMentionReactionWorkflow({
-              messageId: message.id,
-              channelId: message.channel.id,
-              authorId: message.author.id,
-              authorName: message.author.username,
-              messageCreatedAt: message.createdAt.toISOString(),
-              sendReport: sendWorkflowReport,
-              setPhase: workflowReactions.setPhase,
-            })
-          );
-          return;
-        }
-
-        if (isHashtagReactionWorkflowPrompt(prompt)) {
-          await withWorkflowReactions(() =>
-            runHashtagReactionWorkflow({
-              messageId: message.id,
-              channelId: message.channel.id,
-              authorId: message.author.id,
-              authorName: message.author.username,
-              messageCreatedAt: message.createdAt.toISOString(),
-              sendReport: sendWorkflowReport,
-              setPhase: workflowReactions.setPhase,
-            })
-          );
-          return;
-        }
-
-        if (isElythWorkflowPrompt(prompt)) {
-          await runElythWorkflow({
-            messageId: message.id,
-            channelId: message.channel.id,
-            authorId: message.author.id,
-            authorName: message.author.username,
-            messageCreatedAt: message.createdAt.toISOString(),
-            sendReport: sendWorkflowReport,
-          });
-          return;
-        }
+        if (handledDirectWorkflow) return;
 
         // karakuri-worldチャンネルはワークフローで処理（LLMセッションを使わない）
         if (channelSkillName === 'karakuri-world') {
@@ -942,98 +976,32 @@ async function main() {
           if (!threadId) return text;
           return text.replace(new RegExp(`<#${channelId}>`, 'g'), `<#${threadId}>`);
         };
+        const bindWorkflowSession = async (sessionId: string, reason: string) => {
+          const effectiveChannelId = threadId || channelId;
+          setSession(effectiveChannelId, sessionId);
+          console.log(
+            `[scheduler] Bound workflow session ${sessionId.slice(0, 8)}... to channel ${effectiveChannelId} (${reason})`
+          );
+        };
 
-        if (isSelfTweetWorkflowPrompt(prompt)) {
-          let reportText = '';
-          await runSelfTweetWorkflow({
+        let workflowReportText = '';
+        const handledDirectWorkflow = await runDirectWorkflow(
+          prompt,
+          {
             channelId: threadId || channelId,
             authorName: 'scheduler',
             messageCreatedAt: new Date().toISOString(),
-            sendReport: async (text: string) => {
-              reportText = text;
-              const sent = (await (channel as { send: (c: string) => Promise<Message> }).send(
-                text
-              )) as Message;
-              return {
-                messageId: sent.id,
-                channelId: sent.channel.id,
-                authorId: sent.author.id,
-                authorName: sent.author.username,
-                createdAt: sent.createdAt.toISOString(),
-              };
-            },
-          });
-          return reportText;
-        }
-
-        if (isMentionReactionWorkflowPrompt(prompt)) {
-          let reportText = '';
-          await runMentionReactionWorkflow({
-            channelId: threadId || channelId,
-            authorName: 'scheduler',
-            messageCreatedAt: new Date().toISOString(),
-            sendReport: async (text: string) => {
-              reportText = text;
-              const sent = (await (channel as { send: (c: string) => Promise<Message> }).send(
-                text
-              )) as Message;
-              return {
-                messageId: sent.id,
-                channelId: sent.channel.id,
-                authorId: sent.author.id,
-                authorName: sent.author.username,
-                createdAt: sent.createdAt.toISOString(),
-              };
-            },
-          });
-          return reportText;
-        }
-
-        if (isHashtagReactionWorkflowPrompt(prompt)) {
-          let reportText = '';
-          await runHashtagReactionWorkflow({
-            channelId: threadId || channelId,
-            authorName: 'scheduler',
-            messageCreatedAt: new Date().toISOString(),
-            sendReport: async (text: string) => {
-              reportText = text;
-              const sent = (await (channel as { send: (c: string) => Promise<Message> }).send(
-                text
-              )) as Message;
-              return {
-                messageId: sent.id,
-                channelId: sent.channel.id,
-                authorId: sent.author.id,
-                authorName: sent.author.username,
-                createdAt: sent.createdAt.toISOString(),
-              };
-            },
-          });
-          return reportText;
-        }
-
-        if (isElythWorkflowPrompt(prompt)) {
-          let reportText = '';
-          await runElythWorkflow({
-            channelId: threadId || channelId,
-            authorName: 'scheduler',
-            messageCreatedAt: new Date().toISOString(),
-            sendReport: async (text: string) => {
-              reportText = text;
-              const sent = (await (channel as { send: (c: string) => Promise<Message> }).send(
-                text
-              )) as Message;
-              return {
-                messageId: sent.id,
-                channelId: sent.channel.id,
-                authorId: sent.author.id,
-                authorName: sent.author.username,
-                createdAt: sent.createdAt.toISOString(),
-              };
-            },
-          });
-          return reportText;
-        }
+            bindSession: bindWorkflowSession,
+            sendReport: buildChannelWorkflowReportSender(
+              channel as { send: (content: string) => Promise<Message> },
+              (text) => {
+                workflowReportText = text;
+              }
+            ),
+          },
+          { handleApprovals: false }
+        );
+        if (handledDirectWorkflow) return workflowReportText;
 
         // プロンプト内の !discord send コマンドを先に直接実行
         const promptCommands = extractDiscordSendFromPrompt(prompt);

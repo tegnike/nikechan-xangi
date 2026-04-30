@@ -97,11 +97,12 @@ export interface ReviewedSelfTweetDraft extends SelfTweetDraft {
 }
 
 export interface MasterSelfTweetDecision {
-  action: 'post' | 'revise' | 'cancel';
+  action: 'post' | 'revise' | 'cancel' | 'chat';
   selectedDraftId?: string;
   instruction?: string;
   responseMessage?: string;
   feedbackForFuture?: string;
+  sessionId?: string;
 }
 
 export interface MentionReactionCandidate {
@@ -148,11 +149,12 @@ export interface ReviewedMentionReactionItem extends MentionReactionItem {
 }
 
 export interface MasterMentionReactionDecision {
-  action: 'execute' | 'revise' | 'cancel';
+  action: 'execute' | 'revise' | 'cancel' | 'chat';
   selectedItemIds?: string[];
   instruction?: string;
   responseMessage?: string;
   feedbackForFuture?: string;
+  sessionId?: string;
 }
 
 export interface HashtagReactionCandidate {
@@ -391,9 +393,10 @@ export async function interpretMasterSelfTweetReply(input: {
     drafts: ReviewedSelfTweetDraft[];
     revisionCount: number;
   };
+  sessionId?: string;
 }): Promise<MasterSelfTweetDecision> {
   const prompt = `あなたはAIニケちゃんのself-tweet承認フロー制御担当です。
-マスターの返信を読み、投稿・修正・却下のどれかに分類してください。
+マスターの返信を読み、投稿・修正・却下・通常返答のどれかに分類してください。
 1-6までの文脈を保持するため、候補一覧とsource-collector結果を必ず参照します。
 
 ## マスターの返信
@@ -409,6 +412,8 @@ ${JSON.stringify(input.pending.drafts, null, 2)}
 ${input.pending.revisionCount}
 
 ## 判断ルール
+- 質問、確認、雑談、根拠確認、ログ確認、ソース確認が含まれる場合は action=chat。たとえ「3案いいね」のような好意的な評価が含まれていても、質問に答えるだけで投稿しない。
+- 「実際に〜したログある？」「これは本当？」「どういう意味？」「なぜ？」のような確認は action=chat。
 - 「1」「2番」「これ」「OK」「どうぞ」など、投稿対象が明確で、本文変更の指示がなければ action=post。
 - 「1で良い」「3案で」「これで投稿」「このまま」など、マスターが承認していて、本文変更の指示がなければ即投稿する。承認後に再提示しない。
 - 番号指定なしのOKは、最初の候補を選ぶ。
@@ -420,22 +425,27 @@ ${input.pending.revisionCount}
 - revise の場合、instruction にマスターの意図と保持すべき文脈を具体的に書く。
 - revise の場合、responseMessage にマスターへ返す短い自然な前置き文を書く。例: "承知しました。案2だけ直すと、これでどうでしょうか。"
 - cancel の場合、responseMessage にマスターへ返す短い自然な返答を書く。マスターの文脈に合わせ、定型文だけにしない。
+- chat の場合、responseMessage にマスターへの自然な返答を書く。候補・source-collector・レビュー文脈から答え、承認待ちは維持する。
 - 今後も適用すべき口調・題材・判断ルールが含まれていれば feedbackForFuture に短く書く。一回限りなら省略する。
 
 ## 出力
 JSONだけを返してください。Markdownは禁止です。
 
 {
-  "action": "post|revise|cancel",
+  "action": "post|revise|cancel|chat",
   "selectedDraftId": "d1",
-  "instruction": "修正指示。post/cancelなら省略可",
-  "responseMessage": "revise/cancel時にDiscordへ返す短い文。postなら省略可",
+  "instruction": "修正指示。post/cancel/chatなら省略可",
+  "responseMessage": "revise/cancel/chat時にDiscordへ返す短い文。postなら省略可",
   "feedbackForFuture": "今後も適用するルール。なければ省略"
 }`;
 
-  const decision = await runJson<Partial<MasterSelfTweetDecision>>(prompt);
+  const result = await runJsonResult<Partial<MasterSelfTweetDecision>>(prompt, input.sessionId);
+  const decision = result.value;
   const action =
-    decision?.action === 'post' || decision?.action === 'cancel' || decision?.action === 'revise'
+    decision?.action === 'post' ||
+    decision?.action === 'cancel' ||
+    decision?.action === 'revise' ||
+    decision?.action === 'chat'
       ? decision.action
       : 'revise';
   return {
@@ -447,6 +457,7 @@ JSONだけを返してください。Markdownは禁止です。
       typeof decision?.responseMessage === 'string' ? decision.responseMessage : undefined,
     feedbackForFuture:
       typeof decision?.feedbackForFuture === 'string' ? decision.feedbackForFuture : undefined,
+    sessionId: result.sessionId,
   };
 }
 
@@ -771,9 +782,10 @@ export async function interpretMasterMentionReactionReply(input: {
     items: ReviewedMentionReactionItem[];
     revisionCount: number;
   };
+  sessionId?: string;
 }): Promise<MasterMentionReactionDecision> {
   const prompt = `あなたはAIニケちゃんのmention-reaction承認フロー制御担当です。
-マスターの返信を読み、投稿実行・修正・却下のどれかに分類してください。
+マスターの返信を読み、投稿実行・修正・却下・通常返答のどれかに分類してください。
 
 ## マスターの返信
 ${input.message}
@@ -785,6 +797,8 @@ ${JSON.stringify(input.pending.items, null, 2)}
 ${input.pending.revisionCount}
 
 ## 判断ルール
+- 質問、確認、雑談、根拠確認、ログ確認、ソース確認が含まれる場合は action=chat。好意的な評価が含まれていても、投稿実行せず質問に答える。
+- 「実際に〜したログある？」「これは本当？」「どういう意味？」「なぜ？」のような確認は action=chat。
 - 「OK」「承認」「投稿して」「リプして」「引用して」「全部OK」など投稿・スキップ判断を進める意図なら action=execute。
 - 「1だけ」「2と4」など番号指定があれば selectedItemIds に m1, m2 のように入れる。
 - 「1で良い」「3案で」「このまま」「それで」など、マスターが承認している場合は即実行する。承認後に再提示しない。
@@ -794,22 +808,30 @@ ${input.pending.revisionCount}
 - 文体修正、個別修正、別案希望、短く、もっと柔らかく等、マスターが本文変更を求めている場合だけ action=revise。revise後は再提示して、次のマスター返信を待つ。
 - revise の場合、instruction にマスターの意図と対象候補を具体的に書く。
 - cancel の場合、responseMessage にマスターへ返す短い自然な返答を書く。マスターの文脈に合わせ、定型文だけにしない。
+- chat の場合、responseMessage にマスターへの自然な返答を書く。候補・人物文脈・レビュー文脈から答え、承認待ちは維持する。
 - 今後も適用すべき口調・人物別対応・判断ルールが含まれていれば feedbackForFuture に短く書く。
 
 ## 出力
 JSONだけを返してください。Markdownは禁止です。
 
 {
-  "action": "execute|revise|cancel",
+  "action": "execute|revise|cancel|chat",
   "selectedItemIds": ["m1"],
-  "instruction": "修正指示。execute/cancelなら省略可",
-  "responseMessage": "cancel時にDiscordへ返す短い文。execute/reviseなら省略可",
+  "instruction": "修正指示。execute/cancel/chatなら省略可",
+  "responseMessage": "cancel/chat時にDiscordへ返す短い文。execute/reviseなら省略可",
   "feedbackForFuture": "今後も適用するルール。なければ省略"
 }`;
 
-  const decision = await runJson<Partial<MasterMentionReactionDecision>>(prompt);
+  const result = await runJsonResult<Partial<MasterMentionReactionDecision>>(
+    prompt,
+    input.sessionId
+  );
+  const decision = result.value;
   const action =
-    decision?.action === 'execute' || decision?.action === 'cancel' || decision?.action === 'revise'
+    decision?.action === 'execute' ||
+    decision?.action === 'cancel' ||
+    decision?.action === 'revise' ||
+    decision?.action === 'chat'
       ? decision.action
       : 'revise';
   return {
@@ -822,6 +844,7 @@ JSONだけを返してください。Markdownは禁止です。
       typeof decision?.responseMessage === 'string' ? decision.responseMessage : undefined,
     feedbackForFuture:
       typeof decision?.feedbackForFuture === 'string' ? decision.feedbackForFuture : undefined,
+    sessionId: result.sessionId,
   };
 }
 
@@ -862,6 +885,106 @@ JSONだけを返してください。Markdownは禁止です。
   const message = String(response?.message || '').trim();
   if (!message) throw new Error('recovery reply is empty');
   return message.slice(0, 500);
+}
+
+export async function generateSelfTweetCompletionReply(input: {
+  masterMessage: string;
+  draft: ReviewedSelfTweetDraft;
+  result: string;
+  dryRun: boolean;
+  sessionId?: string;
+}): Promise<{ message: string; sessionId?: string }> {
+  const prompt = `${CHARACTER_BASE}
+
+${CHARACTER_TWITTER}
+
+あなたはAIニケちゃんです。
+self-tweet承認スレッドで、マスターの返信を受けて投稿処理が完了しました。
+Discordに返す本文を自然に作ってください。
+
+## マスターの返信
+${input.masterMessage}
+
+## 投稿した案
+${JSON.stringify(input.draft, null, 2)}
+
+## 投稿結果
+dryRun=${input.dryRun}
+${input.result || '（URLなし）'}
+
+## 返答ルール
+- 固定文の「投稿しました。」だけで済ませない。
+- マスターの返信に含まれていた意図に短く触れる。
+- 投稿URLがあれば必ず含める。
+- 本文は1〜3文。必要ならURLは別行。
+- 内部関数名やJSONは出さない。
+
+## 出力
+JSONだけを返してください。Markdownは禁止です。
+
+{"message":"Discordに返す本文"}`;
+
+  const result = await runJsonResult<{ message?: string }>(prompt, input.sessionId);
+  return {
+    message: String(result.value?.message || '')
+      .trim()
+      .slice(0, 1000),
+    sessionId: result.sessionId,
+  };
+}
+
+export async function generateMentionReactionCompletionReply(input: {
+  masterMessage: string;
+  items: ReviewedMentionReactionItem[];
+  summary: string;
+  results: Array<{
+    item_id: string;
+    action: string;
+    reply_url?: string;
+    quote_url?: string;
+    error?: string;
+  }>;
+  dryRun: boolean;
+  sessionId?: string;
+}): Promise<{ message: string; sessionId?: string }> {
+  const prompt = `${CHARACTER_BASE}
+
+${CHARACTER_TWITTER}
+
+あなたはAIニケちゃんです。
+mention-reaction承認スレッドで、マスターの返信を受けて処理が完了しました。
+Discordに返す本文を自然に作ってください。
+
+## マスターの返信
+${input.masterMessage}
+
+## 実行対象
+${JSON.stringify(input.items, null, 2)}
+
+## 実行結果
+dryRun=${input.dryRun}
+summary=${input.summary}
+${JSON.stringify(input.results, null, 2)}
+
+## 返答ルール
+- 固定文の「メンション反応を処理しました。」だけで済ませない。
+- マスターの返信に含まれていた意図に短く触れる。
+- 投稿URLがあれば必ず含める。
+- 本文は1〜4文。必要ならURLは別行。
+- 内部関数名やJSONは出さない。
+
+## 出力
+JSONだけを返してください。Markdownは禁止です。
+
+{"message":"Discordに返す本文"}`;
+
+  const result = await runJsonResult<{ message?: string }>(prompt, input.sessionId);
+  return {
+    message: String(result.value?.message || '')
+      .trim()
+      .slice(0, 1200),
+    sessionId: result.sessionId,
+  };
 }
 
 export async function reviseMentionReactionPlanFromMaster(input: {
@@ -933,7 +1056,7 @@ JSONだけを返してください。Markdownは禁止です。
 export async function generateHashtagReactionPlan(input: {
   emotionText: string;
   candidates: HashtagReactionCandidate[];
-}): Promise<HashtagReactionItem[]> {
+}): Promise<{ items: HashtagReactionItem[]; sessionId?: string }> {
   const prompt = `${HASHTAG_REACTION_RULES}
 
 あなたはAIニケちゃんのhashtag-reaction判定担当です。
@@ -976,8 +1099,11 @@ JSONだけを返してください。Markdownは禁止です。
   ]
 }`;
 
-  const parsed = await runJson<{ items?: Partial<HashtagReactionItem>[] }>(prompt);
-  return normalizeHashtagItems(parsed?.items ?? [], input.candidates);
+  const result = await runJsonResult<{ items?: Partial<HashtagReactionItem>[] }>(prompt);
+  return {
+    items: normalizeHashtagItems(result.value?.items ?? [], input.candidates),
+    sessionId: result.sessionId,
+  };
 }
 
 export async function decideMentionNickname(input: {
