@@ -409,14 +409,16 @@ ${JSON.stringify(input.pending.drafts, null, 2)}
 ${input.pending.revisionCount}
 
 ## 判断ルール
-- 「1」「2番」「これ」「OK」「どうぞ」など、投稿対象が明確なら action=post。
-- 「1で良い」「3案で」「これで投稿」「このまま」など、マスターが承認している場合は即投稿する。承認後に再提示しない。
+- 「1」「2番」「これ」「OK」「どうぞ」など、投稿対象が明確で、本文変更の指示がなければ action=post。
+- 「1で良い」「3案で」「これで投稿」「このまま」など、マスターが承認していて、本文変更の指示がなければ即投稿する。承認後に再提示しない。
 - 番号指定なしのOKは、最初の候補を選ぶ。
 - 明確に「却下」「見送り」「スキップ」「今回はなし」「やめて」「キャンセル」「NG」「投稿しない」と言っている場合は action=cancel。
 - 「全体的に分かりづらいのでスキップ」「スキップだって」「今回は見送り」「今回はやめておく」「投稿しなくていい」は修正指示ではなく action=cancel。
 - 「微妙」「全体的に違う」「もっと良くして」などの否定的評価は見送りではなく action=revise。マスターが見送るかどうかを判断するので、曖昧な不満で候補を脱落させない。
 - 文体修正、内容追加、別案希望、混ぜて、短く等、マスターが本文変更を求めている場合だけ action=revise。revise後は再提示して、次のマスター返信を待つ。
+- 「2つめが良いけど、最後の文は要らない」のように番号・順番で特定案を指定して修正している場合、action=revise かつ selectedDraftId に該当案IDを入れる。
 - revise の場合、instruction にマスターの意図と保持すべき文脈を具体的に書く。
+- revise の場合、responseMessage にマスターへ返す短い自然な前置き文を書く。例: "承知しました。案2だけ直すと、これでどうでしょうか。"
 - cancel の場合、responseMessage にマスターへ返す短い自然な返答を書く。マスターの文脈に合わせ、定型文だけにしない。
 - 今後も適用すべき口調・題材・判断ルールが含まれていれば feedbackForFuture に短く書く。一回限りなら省略する。
 
@@ -427,7 +429,7 @@ JSONだけを返してください。Markdownは禁止です。
   "action": "post|revise|cancel",
   "selectedDraftId": "d1",
   "instruction": "修正指示。post/cancelなら省略可",
-  "responseMessage": "cancel時にDiscordへ返す短い文。post/reviseなら省略可",
+  "responseMessage": "revise/cancel時にDiscordへ返す短い文。postなら省略可",
   "feedbackForFuture": "今後も適用するルール。なければ省略"
 }`;
 
@@ -519,6 +521,89 @@ JSONだけを返してください。Markdownは禁止です。
   const result = await runJsonResult<{ drafts?: SelfTweetDraft[] }>(prompt, input.sessionId);
   return {
     drafts: normalizeDrafts(result.value?.drafts ?? []),
+    sessionId: result.sessionId,
+  };
+}
+
+export async function reviseSingleSelfTweetDraftFromMaster(input: {
+  instruction: string;
+  targetDraft: ReviewedSelfTweetDraft;
+  sessionId?: string;
+  pending: {
+    emotionText: string;
+    todayTopics: string;
+    recentTweets: string;
+    sourceCollection: SelfTweetSourceCollection;
+    drafts: ReviewedSelfTweetDraft[];
+    personContext?: string;
+    performanceContext?: string;
+    runStateContext?: string;
+  };
+}): Promise<{ draft: SelfTweetDraft; revisionNotes?: string; sessionId?: string }> {
+  const prompt = `${SELF_TWEET_RULES}
+
+あなたはAIニケちゃんのself-tweet修正担当です。
+マスターは特定の案だけを修正するよう指示しています。
+対象案だけを直してください。他の案を作り直したり、別案を追加したりしないでください。
+
+## キャラクター設定
+${CHARACTER_BASE}
+
+${CHARACTER_TWITTER}
+
+## マスターの指示
+${input.instruction}
+
+## 感情状態
+${input.pending.emotionText}
+
+## 今日使ったネタ
+${input.pending.todayTopics || '（なし）'}
+
+## 直近ツイート
+${input.pending.recentTweets || '（なし）'}
+
+## source-collector結果
+${JSON.stringify(input.pending.sourceCollection, null, 2)}
+
+## 人物・関係性コンテキスト
+${input.pending.personContext || '（なし）'}
+
+## 過去実績・失敗傾向
+${input.pending.performanceContext || '（なし）'}
+
+## Twitter workflow状態
+${input.pending.runStateContext || '（なし）'}
+
+## 全候補の文脈
+${JSON.stringify(input.pending.drafts, null, 2)}
+
+## 修正対象
+${JSON.stringify(input.targetDraft, null, 2)}
+
+## 出力
+JSONだけを返してください。Markdownは禁止です。
+
+{
+  "id": "${input.targetDraft.id}",
+  "text": "修正後本文。日本語。280字以内。ハッシュタグなし",
+  "topic": "topics-addに保存する具体的なネタ説明",
+  "sourceCandidateIds": ["s1"],
+  "angle": "表現方針",
+  "selfReviewMemo": "情報源、選択理由、表現意図",
+  "revisionNotes": "マスター指示をどう反映したか"
+}`;
+
+  const result = await runJsonResult<SelfTweetDraft & { revisionNotes?: string }>(
+    prompt,
+    input.sessionId
+  );
+  const draft = normalizeDrafts([{ ...result.value, id: input.targetDraft.id }])[0];
+  if (!draft) throw new Error(`targeted revision produced empty draft: ${input.targetDraft.id}`);
+  return {
+    draft,
+    revisionNotes:
+      typeof result.value.revisionNotes === 'string' ? result.value.revisionNotes : undefined,
     sessionId: result.sessionId,
   };
 }

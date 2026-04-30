@@ -15,6 +15,7 @@ import {
   reviewAndReviseMentionReactionItem,
   reviewAndReviseSelfTweetDraft,
   reviseMentionReactionPlanFromMaster,
+  reviseSingleSelfTweetDraftFromMaster,
   reviseSelfTweetDraftsFromMaster,
   sanitizeTweetText,
   type HashtagReactionCandidate,
@@ -329,7 +330,11 @@ export async function handleSelfTweetApproval(
 
   try {
     await opts.setPhase?.('thinking');
-    const revised = await revisePendingFromMaster(pending, decision.instruction || normalized);
+    const revised = await revisePendingFromMaster(
+      pending,
+      decision.instruction || normalized,
+      decision.selectedDraftId
+    );
     await savePendingSelfTweet(channelId, revised);
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
@@ -343,7 +348,17 @@ export async function handleSelfTweetApproval(
       },
     });
     await opts.setPhase?.('text');
-    await opts.sendReport(formatApprovalRequest(revised, true));
+    if (decision.selectedDraftId) {
+      await opts.sendReport(
+        formatTargetedSelfTweetRevisionRequest(
+          revised,
+          decision.selectedDraftId,
+          decision.responseMessage
+        )
+      );
+    } else {
+      await opts.sendReport(formatApprovalRequest(revised, true));
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[twitter] self-tweet revision failed:', err);
@@ -1452,8 +1467,48 @@ async function createPendingSelfTweet(
 
 async function revisePendingFromMaster(
   pending: PendingSelfTweet,
-  instruction: string
+  instruction: string,
+  selectedDraftId?: string
 ): Promise<PendingSelfTweet> {
+  if (selectedDraftId) {
+    const target = selectDraft(pending, selectedDraftId);
+    const revised = await reviseSingleSelfTweetDraftFromMaster({
+      instruction,
+      targetDraft: target,
+      sessionId: pending.draftGenerationSessionId,
+      pending: {
+        emotionText: pending.emotionText,
+        todayTopics: pending.todayTopics,
+        recentTweets: pending.recentTweets,
+        sourceCollection: pending.sourceCollection,
+        drafts: pending.drafts,
+        personContext: pending.personContext,
+        performanceContext: pending.performanceContext,
+        runStateContext: pending.runStateContext,
+      },
+    });
+    const revisedDraft = validateDraftShape(revised.draft);
+    const mechanicalCheck = await runMechanicalChecks(revisedDraft.text, {
+      topic: revisedDraft.topic,
+      todayTopics: pending.todayTopics,
+      recentTweets: pending.recentTweets,
+    });
+    const reviewedDraft: ReviewedSelfTweetDraft = {
+      ...revisedDraft,
+      mechanicalCheck,
+      review: okTweetReview(),
+      revisionNotes:
+        revised.revisionNotes || `マスター指示により${draftLabel(pending, target.id)}を修正`,
+    };
+    return {
+      ...pending,
+      createdAt: new Date().toISOString(),
+      revisionCount: pending.revisionCount + 1,
+      draftGenerationSessionId: revised.sessionId ?? pending.draftGenerationSessionId,
+      drafts: pending.drafts.map((draft) => (draft.id === target.id ? reviewedDraft : draft)),
+    };
+  }
+
   const revised = await reviseSelfTweetDraftsFromMaster({
     instruction,
     sessionId: pending.draftGenerationSessionId,
@@ -1720,6 +1775,39 @@ function formatApprovalRequest(pending: PendingSelfTweet, revised = false): stri
   });
   lines.push('投稿する番号、修正指示、または見送りを返信してください。');
   return lines.join('\n').trim();
+}
+
+function formatTargetedSelfTweetRevisionRequest(
+  pending: PendingSelfTweet,
+  selectedDraftId: string,
+  responseMessage?: string
+): string {
+  const draft = selectDraft(pending, selectedDraftId);
+  const label = draftLabel(pending, draft.id);
+  const lines = [
+    responseMessage?.trim() || `承知しました。${label}だけ直すと、これでどうでしょうか。`,
+    '',
+    `📝 ${label}の修正版:`,
+    '',
+    `「${draft.text}」`,
+  ];
+  const sourceTitles = draft.sourceCandidateIds
+    .map(
+      (id) => pending.sourceCollection.candidates.find((candidate) => candidate.id === id)?.title
+    )
+    .filter(Boolean)
+    .join(' / ');
+  if (sourceTitles || draft.angle) {
+    lines.push(`元ソース: ${sourceTitles || '自然発想'} / 切り口: ${draft.angle || '未指定'}`);
+  }
+  if (draft.revisionNotes) lines.push(`修正: ${draft.revisionNotes}`);
+  lines.push('', 'これで投稿する場合は「これで」「投稿して」などと返信してください。');
+  return lines.join('\n').trim();
+}
+
+function draftLabel(pending: PendingSelfTweet, draftId: string): string {
+  const index = pending.drafts.findIndex((draft) => draft.id === draftId);
+  return index >= 0 ? `案${index + 1}` : draftId;
 }
 
 function formatMentionApprovalRequest(pending: PendingMentionReaction, revised = false): string {
