@@ -187,6 +187,7 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
         raw_content: 'ELYTH workflow execute',
         parsed: { execution },
       }).catch((e) => console.error('[elyth] activity log execute insert failed:', e));
+      await recordElythLocalEpisode(execution);
     }
 
     const report = buildDryRunReport(validated, {
@@ -516,6 +517,29 @@ function emptyExecutionSummary(): ElythExecutionSummary {
     notificationsRead: [],
     errors: [],
   };
+}
+
+async function recordElythLocalEpisode(execution: ElythExecutionSummary): Promise<void> {
+  const actionCount =
+    execution.replies.length +
+    execution.likes.length +
+    execution.posts.length +
+    execution.follows.length;
+  if (actionCount === 0) return;
+
+  const date = new Date().toISOString().slice(0, 10);
+  const parts = [
+    `ELYTH活動を実行。返信${execution.replies.length}件`,
+    `いいね${execution.likes.length}件`,
+    `自発投稿${execution.posts.length}件`,
+    `フォロー${execution.follows.length}件`,
+  ];
+  const samplePost = execution.posts[0]?.content
+    ? `。自発投稿「${truncateBlock(execution.posts[0].content, 50)}」`
+    : '';
+  await runDbSh(['ep-add', date, `${parts.join('、')}${samplePost}`.slice(0, 150), 'elyth']).catch(
+    (err) => console.error('[elyth] local episode record failed:', err)
+  );
 }
 
 function buildDryRunReport(

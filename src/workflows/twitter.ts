@@ -299,6 +299,11 @@ export async function handleSelfTweetApproval(
         topic: draft.topic,
       },
     });
+    if (!isTwitterWorkflowDryRun()) {
+      await recordTwitterLocalEpisode(
+        `self-tweetで案${draftLabel(pending, draft.id)}を投稿。ネタ: ${truncateInline(draft.topic, 80)}。本文「${truncateInline(draft.text, 80)}」`
+      );
+    }
     await clearPendingSelfTweet(channelId, 'executed');
     await setTwitterRunState('self_tweet_last_execute', {
       at: new Date().toISOString(),
@@ -322,6 +327,9 @@ export async function handleSelfTweetApproval(
       at: new Date().toISOString(),
       message: normalized,
     });
+    await recordTwitterLocalEpisode(
+      `self-tweetで${pending.drafts.length}案を提示し、マスター判断で見送り。返信「${truncateInline(normalized, 80)}」`
+    );
     await opts.setPhase?.('text');
     await opts.sendReport(decision.responseMessage || '了解です。今回は見送ります。');
     return true;
@@ -1205,6 +1213,9 @@ async function executeMentionReactions(
   }
 
   const summary = `${items.length}件チェック: 返信${replyCount}件、引用RT${quoteCount}件、スキップ${skipCount}件`;
+  if (!isTwitterWorkflowDryRun()) {
+    await recordTwitterLocalEpisode(`mention-reactionを実行。${summary}`);
+  }
   const urls = results
     .flatMap((result) => [result.reply_url, result.quote_url].filter(Boolean))
     .join('\n');
@@ -1318,6 +1329,9 @@ async function executeHashtagReactions(
   }
 
   const summary = `${items.length}件チェック: RT${retweetCount}件、スキップ${skipCount}件`;
+  if (!isTwitterWorkflowDryRun() && items.length > 0) {
+    await recordTwitterLocalEpisode(`hashtag-reactionを実行。${summary}`);
+  }
   await opts.setPhase?.('text');
   await opts.sendReport(formatHashtagReport(items, results));
   return { summary, results };
@@ -1795,6 +1809,13 @@ function mentionItemTextForLog(item: MentionReactionItem): string {
 function truncateInline(text: string, max: number): string {
   const oneLine = text.replace(/\s+/g, ' ').trim();
   return oneLine.length > max ? `${oneLine.slice(0, max)}...` : oneLine;
+}
+
+async function recordTwitterLocalEpisode(content: string): Promise<void> {
+  const date = new Date().toISOString().slice(0, 10);
+  await runDbSh(['ep-add', date, content.slice(0, 150), 'twitter']).catch((err) =>
+    console.error('[twitter] local episode record failed:', err)
+  );
 }
 
 interface TwitterActivityLogInput {
