@@ -35,6 +35,7 @@ import {
   fetchDiscordLinkContent,
   fetchReplyContent,
   fetchChannelMessages,
+  fetchThreadContext,
 } from './discord-fetchers.js';
 import { handleDiscordCommand, handleDiscordCommandsInResponse } from './discord-commands.js';
 import { handleAutocomplete, handleSkill, handleSkillCommand } from './command-handlers.js';
@@ -706,6 +707,12 @@ async function main() {
 
     // チャンネルメンションから最新メッセージを取得
     prompt = await fetchChannelMessages(client, prompt, config.timezone);
+    const workflowPrompt = prompt;
+
+    const threadContext = await fetchThreadContext(message, config.timezone);
+    if (threadContext) {
+      prompt = `${threadContext}\n\n## ユーザーの最新メッセージ\n${prompt}`;
+    }
 
     // 添付ファイルをダウンロード
     const attachmentPaths: string[] = [];
@@ -756,7 +763,7 @@ async function main() {
         };
 
         const handledDirectWorkflow = await withWorkflowReactions(() =>
-          runDirectWorkflow(prompt, {
+          runDirectWorkflow(workflowPrompt, {
             messageId: message.id,
             channelId: message.channel.id,
             authorId: message.author.id,

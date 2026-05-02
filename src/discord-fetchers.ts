@@ -1,4 +1,4 @@
-import type { Client, Message } from 'discord.js';
+import { ChannelType, type Client, type Message } from 'discord.js';
 import { sanitizeChannelMentions } from './message-utils.js';
 
 /** Discordリンクからメッセージ内容を取得する */
@@ -97,4 +97,42 @@ export async function fetchChannelMessages(
   }
 
   return result;
+}
+
+/** スレッド内会話の直近文脈を取得する */
+export async function fetchThreadContext(
+  message: Message,
+  timezone: string
+): Promise<string | null> {
+  const isThread =
+    message.channel.type === ChannelType.PublicThread ||
+    message.channel.type === ChannelType.PrivateThread ||
+    message.channel.type === ChannelType.AnnouncementThread;
+  if (!isThread || !('messages' in message.channel)) return null;
+
+  try {
+    const messages = await message.channel.messages.fetch({ limit: 12 });
+    const list = messages
+      .reverse()
+      .map((m) => {
+        const time = m.createdAt.toLocaleString('ja-JP', { timeZone: timezone });
+        const content = sanitizeChannelMentions(m.content || '(添付ファイルのみ)');
+        const marker = m.id === message.id ? '最新' : '';
+        return `[${time}]${marker ? ` ${marker}` : ''} ${m.author.tag}: ${content}`;
+      })
+      .join('\n');
+    const threadChannel = message.channel as { id: string; name?: string };
+    const threadName = threadChannel.name || threadChannel.id;
+    return [
+      '---',
+      `Discordスレッド #${threadName} の直近文脈です。`,
+      'このスレッド内の人間の発言は、基本的にあなたへの返信として扱ってください。',
+      '単なる感謝や確認にも、文脈に沿って短く自然に返答してください。',
+      list,
+      '---',
+    ].join('\n');
+  } catch (err) {
+    console.error('[xangi] Failed to fetch thread context:', err);
+    return null;
+  }
 }
