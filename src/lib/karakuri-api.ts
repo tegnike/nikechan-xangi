@@ -9,6 +9,10 @@ const BUSY_CODES = [
   'target_unavailable',
   'invalid_next_speaker',
   'conversation_not_found',
+  'info_already_consumed',
+  'in_transfer',
+  'transfer_role_conflict',
+  'transfer_already_settled',
 ];
 
 export async function runKarakuriCommand(
@@ -17,8 +21,21 @@ export async function runKarakuriCommand(
   message?: string | null,
   lockKey?: string
 ): Promise<string> {
-  const parts = [command, ...args.split(' ').filter(Boolean)];
-  if (message) parts.push(message);
+  const argParts = args.split(' ').filter(Boolean);
+  const parts = [command, ...argParts];
+  if (message) {
+    if (
+      ['conversation-speak', 'conversation-end', 'conversation_speak', 'conversation_end'].includes(
+        command
+      )
+    ) {
+      const nextSpeaker = argParts[0] ?? '';
+      const trailingFlags = argParts.slice(1);
+      parts.splice(1, parts.length - 1, nextSpeaker, message, ...trailingFlags);
+    } else {
+      parts.push(message);
+    }
+  }
   const env = lockKey ? { ...process.env, KARAKURI_ACTION_LOCK_KEY: lockKey } : process.env;
   try {
     return await runKarakuriSh(parts, env);

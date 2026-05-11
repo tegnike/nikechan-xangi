@@ -30,7 +30,24 @@ const HAS_CHOICES_RE = /選択肢[：:]/;
 // conversation_id抽出
 const CONVERSATION_ID_RE = /conversation[-_][\w-]+/i;
 
-const RECORDABLE_COMMANDS = new Set(['move', 'action', 'use-item']);
+const RECORDABLE_COMMANDS = new Set([
+  'move',
+  'action',
+  'use-item',
+  'transfer',
+  'transfer-accept',
+  'transfer-reject',
+]);
+const INFO_COMMANDS = new Set([
+  'perception',
+  'actions',
+  'map',
+  'world-agents',
+  'status',
+  'nearby-agents',
+  'active-conversations',
+  'event',
+]);
 const SELF_AGENT_ID = '1470446478261747854';
 
 export interface ParsedKarakuriChoice extends Record<string, unknown> {
@@ -297,7 +314,9 @@ export async function runKarakuriWorkflow(
     event_date: today,
     event_time: now,
     action: `${decision.command} ${decision.args}`.trim(),
-    thought: decision.thought || undefined,
+    thought: INFO_COMMANDS.has(decision.command)
+      ? compactApiResult(apiResult)
+      : decision.thought || undefined,
   }).catch((e) => console.error('[karakuri] addMemoryEntry failed:', e));
 
   // Discordレポート（アクションした場合のみ）
@@ -402,10 +421,17 @@ export function normalizeCommand(command: string): string {
   const normalized = command.trim().replace(/_/g, '-');
   const aliases: Record<string, string> = {
     'end-conversation': 'conversation-end',
+    use_item: 'use-item',
+    transfer_accept: 'transfer-accept',
+    transfer_reject: 'transfer-reject',
     'get-available-actions': 'actions',
     'get-perception': 'perception',
     'get-map': 'map',
     'get-world-agents': 'world-agents',
+    'get-status': 'status',
+    'get-nearby-agents': 'nearby-agents',
+    'get-active-conversations': 'active-conversations',
+    'get-event': 'event',
   };
   return aliases[normalized] ?? normalized;
 }
@@ -419,7 +445,7 @@ export function normalizeKarakuriDecision(
 
   const firstArg = args.split(/\s+/)[0] ?? '';
   const nestedCommand = firstArg ? normalizeCommand(firstArg) : '';
-  if (command === 'action' && ['use-item', 'wait', 'move'].includes(nestedCommand)) {
+  if (command === 'action' && ['use-item', 'wait', 'move', 'transfer'].includes(nestedCommand)) {
     command = nestedCommand;
     args = args.split(/\s+/).slice(1).join(' ');
   }
@@ -634,4 +660,23 @@ function buildReportText(command: string, args: string, message?: string | null)
   const argStr = args.trim() ? ` ${args.trim()}` : '';
   const msgStr = message ? ` 「${message}」` : '';
   return `[からくりワールド] ${command}${argStr}${msgStr}`;
+}
+
+function compactApiResult(apiResult: string): string {
+  if (!apiResult) return '';
+  try {
+    const parsed = JSON.parse(apiResult) as {
+      command?: unknown;
+      data?: unknown;
+      message?: unknown;
+    };
+    const compact = {
+      command: parsed.command,
+      data: parsed.data,
+      message: parsed.message,
+    };
+    return JSON.stringify(compact).slice(0, 600);
+  } catch {
+    return apiResult.slice(0, 600);
+  }
 }

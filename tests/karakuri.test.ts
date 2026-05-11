@@ -67,4 +67,32 @@ describe('karakuri notification guards', () => {
     });
     expect(validateKarakuriDecision(decision, parsed)).toBeNull();
   });
+
+  it('normalizes upstream 0.2 command names used in choices', () => {
+    const notification =
+      '譲渡オファーがあります。 選択肢: - transfer_accept: 受け取る - transfer_reject: 断る - get_status: 所持品を確認する - use_item: りんごを使う (item_id: apple) karakuri-world スキルで次の行動を選択してください。';
+    const parsed = parseKarakuriNotification(notification, true);
+
+    expect(parsed.choices.map((c) => c.command)).toEqual([
+      'transfer-accept',
+      'transfer-reject',
+      'status',
+      'use-item',
+    ]);
+
+    const decision = normalizeKarakuriDecision(
+      {
+        command: 'transfer_accept',
+        args: '',
+        thought: '受け取る',
+        dP: 0.05,
+        dA: 0,
+        dD: 0,
+      },
+      parsed
+    );
+
+    expect(decision.command).toBe('transfer-accept');
+    expect(validateKarakuriDecision(decision, parsed)).toBeNull();
+  });
 });
