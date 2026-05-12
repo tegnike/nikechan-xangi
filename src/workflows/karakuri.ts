@@ -56,10 +56,6 @@ const INFO_COMMANDS = new Set([
 const SELF_AGENT_ID = '1470446478261747854';
 const COMMITMENT_PRIORITY_WINDOW_MS = 90 * 60 * 1000;
 const COMMITMENT_GRACE_WINDOW_MS = 6 * 60 * 60 * 1000;
-const KNOWN_LOCATION_NODES: Record<string, string> = {
-  'ファミレス「ジョイ」': '24-56',
-  ファミレスジョイ: '24-56',
-};
 
 export interface ParsedKarakuriChoice extends Record<string, unknown> {
   command?: string;
@@ -575,7 +571,6 @@ export function extractKarakuriCommitments(
     }
 
     const locationName = extractCommitmentLocation(message.message);
-    const targetNodeId = locationName ? KNOWN_LOCATION_NODES[locationName] : undefined;
     const person = findPersonBySpeaker(message.speaker, people);
     const description = buildCommitmentDescription(message.speaker, message.message, locationName);
     const dedupeKey = `${dueAt}|${person?.agentId ?? message.speaker}|${description}`;
@@ -588,7 +583,7 @@ export function extractKarakuriCommitments(
       description,
       due_at_world: dueAt,
       location_name: locationName ?? null,
-      target_node_id: targetNodeId ?? null,
+      target_node_id: null,
       source_activity_log_id: activityLogId ?? null,
       source_text: message.message,
       metadata: {
@@ -609,31 +604,44 @@ export function prioritizeDueCommitment(
   now = new Date()
 ): KarakuriDecision {
   const hasMoveChoice = parsedNotification.choices.some((choice) => choice.command === 'move');
-  if (!hasMoveChoice) return decision;
+  const hasMapChoice = parsedNotification.choices.some((choice) => choice.command === 'map');
+  if (!hasMoveChoice && !hasMapChoice) return decision;
 
   const currentNode = parseCurrentNode(notification);
   const dueCommitment = commitments.find((commitment) => {
-    if (commitment.status !== 'pending' || !commitment.target_node_id || !commitment.due_at_world) {
-      return false;
-    }
-    if (currentNode === commitment.target_node_id) return false;
-    const dueTime = new Date(commitment.due_at_world).getTime();
-    if (!Number.isFinite(dueTime)) return false;
-    const diff = dueTime - now.getTime();
-    return diff <= COMMITMENT_PRIORITY_WINDOW_MS && diff >= -COMMITMENT_GRACE_WINDOW_MS;
+    return isCommitmentDue(commitment, now);
   });
 
-  if (!dueCommitment?.target_node_id) return decision;
+  if (!dueCommitment) return decision;
 
-  return {
-    ...decision,
-    command: 'move',
-    args: dueCommitment.target_node_id,
-    message: undefined,
-    thought: `約束優先: ${dueCommitment.description}`.slice(0, 60),
-    dP: Math.max(decision.dP ?? 0, 0.03),
-    dA: Math.max(decision.dA ?? 0, 0.08),
-  };
+  const targetNodeId =
+    dueCommitment.target_node_id ||
+    resolveLocationNodeFromNotification(dueCommitment.location_name, notification);
+
+  if (targetNodeId && currentNode !== targetNodeId && hasMoveChoice) {
+    return {
+      ...decision,
+      command: 'move',
+      args: targetNodeId,
+      message: undefined,
+      thought: `約束優先: ${dueCommitment.description}`.slice(0, 60),
+      dP: Math.max(decision.dP ?? 0, 0.03),
+      dA: Math.max(decision.dA ?? 0, 0.08),
+    };
+  }
+
+  if (!targetNodeId && dueCommitment.location_name && hasMapChoice && decision.command !== 'map') {
+    return {
+      ...decision,
+      command: 'map',
+      args: '',
+      message: undefined,
+      thought: `約束場所確認: ${dueCommitment.location_name}`.slice(0, 60),
+      dA: Math.max(decision.dA ?? 0, 0.06),
+    };
+  }
+
+  return decision;
 }
 
 async function addSkippedActionLog(input: {
@@ -726,16 +734,11 @@ async function markArrivedCommitments(
   if (!currentNode) return;
   const now = Date.now();
   for (const commitment of commitments) {
-    if (
-      commitment.status !== 'pending' ||
-      commitment.target_node_id !== currentNode ||
-      !commitment.due_at_world
-    ) {
-      continue;
-    }
-    const dueTime = new Date(commitment.due_at_world).getTime();
-    if (!Number.isFinite(dueTime)) continue;
-    if (dueTime - now > COMMITMENT_PRIORITY_WINDOW_MS) continue;
+    if (!isCommitmentDue(commitment, new Date(now))) continue;
+    const targetNodeId =
+      commitment.target_node_id ||
+      resolveLocationNodeFromNotification(commitment.location_name, notification);
+    if (targetNodeId !== currentNode) continue;
     await updateKarakuriCommitmentStatus(
       commitment.id,
       'fulfilled',
@@ -777,6 +780,14 @@ function parseCommitmentDueAt(text: string, baseDateJst: string): string | null 
   return `${date}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00+09:00`;
 }
 
+function isCommitmentDue(commitment: KarakuriCommitment, now: Date): boolean {
+  if (commitment.status !== 'pending' || !commitment.due_at_world) return false;
+  const dueTime = new Date(commitment.due_at_world).getTime();
+  if (!Number.isFinite(dueTime)) return false;
+  const diff = dueTime - now.getTime();
+  return diff <= COMMITMENT_PRIORITY_WINDOW_MS && diff >= -COMMITMENT_GRACE_WINDOW_MS;
+}
+
 function mergeCommitmentMessages(
   parsedMessages: ReturnType<typeof parseConversationMessages>,
   notification: string
@@ -806,6 +817,92 @@ function extractCommitmentLocation(text: string): string | null {
   if (quoted?.[1]) return quoted[1].replace(/[『』]/g, (m) => (m === '『' ? '「' : '」'));
   const simple = text.match(/(駅前|公民館|図書館|水族館|ゲーセン|ゲームセンター|パン屋|映画館)/);
   return simple?.[1] ?? null;
+}
+
+function resolveLocationNodeFromNotification(
+  locationName: string | null | undefined,
+  notification: string
+): string | null {
+  if (!locationName) return null;
+  return (
+    resolveLocationNodeFromJson(locationName, notification) ??
+    resolveLocationNodeFromText(locationName, notification)
+  );
+}
+
+function resolveLocationNodeFromJson(locationName: string, text: string): string | null {
+  const json = extractJsonObject(text);
+  if (!json) return null;
+
+  try {
+    return findLocationNode(JSON.parse(json), normalizeLocationName(locationName));
+  } catch {
+    return null;
+  }
+}
+
+function findLocationNode(value: unknown, normalizedLocation: string): string | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findLocationNode(item, normalizedLocation);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const id = firstString(record.id, record.node_id, record.nodeId);
+  const label = [
+    record.name,
+    record.title,
+    record.label,
+    record.description,
+    record.type,
+    record.building,
+    record.facility,
+  ]
+    .filter((v): v is string => typeof v === 'string')
+    .join(' ');
+
+  if (id && normalizeLocationName(label).includes(normalizedLocation)) {
+    return id;
+  }
+
+  for (const child of Object.values(record)) {
+    const found = findLocationNode(child, normalizedLocation);
+    if (found) return found;
+  }
+  return null;
+}
+
+function resolveLocationNodeFromText(locationName: string, text: string): string | null {
+  const escapedLocation = escapeRegExp(locationName);
+  const compactLocation = escapeRegExp(locationName.replace(/[「」『』\s]/g, ''));
+  const patterns = [
+    new RegExp(`([0-9]+-[0-9]+)[^\\n]{0,120}(?:${escapedLocation}|${compactLocation})`),
+    new RegExp(`(?:${escapedLocation}|${compactLocation})[^\\n]{0,120}([0-9]+-[0-9]+)`),
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) return match[1];
+  }
+  return null;
+}
+
+function normalizeLocationName(value: string): string {
+  return value.replace(/[「」『』\s]/g, '').toLowerCase();
+}
+
+function firstString(...values: unknown[]): string | null {
+  return values.find((v): v is string => typeof v === 'string') ?? null;
+}
+
+function extractJsonObject(text: string): string | null {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  return text.slice(start, end + 1);
 }
 
 function buildCommitmentDescription(
