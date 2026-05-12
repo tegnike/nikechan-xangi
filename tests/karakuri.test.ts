@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  extractKarakuriCommitments,
   normalizeKarakuriDecision,
   parseKarakuriNotification,
+  prioritizeDueCommitment,
   validateKarakuriDecision,
 } from '../src/workflows/karakuri.js';
 
@@ -94,5 +96,71 @@ describe('karakuri notification guards', () => {
 
     expect(decision.command).toBe('transfer-accept');
     expect(validateKarakuriDecision(decision, parsed)).toBeNull();
+  });
+
+  it('extracts dated meeting commitments from conversation messages', () => {
+    const notification =
+      '参加者: 桜草メイ (id: 1474403124906295517)、AIニケちゃん (id: 1470446478261747854) 桜草メイ: 「とっても良いプランですね！明日10時、ファミレス「ジョイ」で待ち合わせですね。楽しみにしてます！」 選択肢: - conversation_speak: 返答する (message: 発言内容, next_speaker_agent_id: 次の話者ID) karakuri-world スキルで次の行動を選択してください。';
+    const parsed = parseKarakuriNotification(notification, true);
+
+    const commitments = extractKarakuriCommitments(
+      '2026-05-11',
+      'activity-log-id',
+      notification,
+      parsed,
+      [
+        {
+          userId: 'user-id',
+          agentId: '1474403124906295517',
+          displayName: '桜草メイ',
+          nickname: 'メイさん',
+        },
+      ]
+    );
+
+    expect(commitments).toHaveLength(1);
+    expect(commitments[0]).toMatchObject({
+      partner_agent_id: '1474403124906295517',
+      partner_name: 'メイさん',
+      due_at_world: '2026-05-12T10:00:00+09:00',
+      location_name: 'ファミレス「ジョイ」',
+      target_node_id: '24-56',
+    });
+  });
+
+  it('overrides ordinary movement when a commitment is due soon', () => {
+    const notification =
+      '現在時刻: 2026-05-12 09:30 (Asia/Tokyo) 現在地: 32-20 選択肢: - move: ノードIDを指定して移動する (target_node_id: ノードID) - action: 図書コーナーで読書 (action_id: read-community-library-corner, 2700秒) karakuri-world スキルで次の行動を選択してください。';
+    const parsed = parseKarakuriNotification(notification, true);
+    const decision = {
+      command: 'action',
+      args: 'read-community-library-corner',
+      message: null,
+      thought: '読書したい',
+      dP: 0.05,
+      dA: 0.05,
+      dD: 0,
+    };
+
+    const guarded = prioritizeDueCommitment(
+      decision,
+      [
+        {
+          id: 'commitment-id',
+          description: 'メイさんとファミレス「ジョイ」で町探索',
+          due_at_world: '2026-05-12T10:00:00+09:00',
+          location_name: 'ファミレス「ジョイ」',
+          target_node_id: '24-56',
+          status: 'pending',
+        },
+      ],
+      parsed,
+      notification,
+      new Date('2026-05-12T00:30:00Z')
+    );
+
+    expect(guarded.command).toBe('move');
+    expect(guarded.args).toBe('24-56');
+    expect(validateKarakuriDecision(guarded, parsed)).toBeNull();
   });
 });

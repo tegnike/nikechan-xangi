@@ -5,16 +5,21 @@ import {
   getMemoryEntries,
   addMemoryEntry,
   addKarakuriActivityLog,
+  addKarakuriCommitment,
   buildKarakuriMemoryContext,
   formatKarakuriPersonContext,
   getRecentContactEpisodes,
+  getPendingKarakuriCommitments,
   addKarakuriEpisode,
   addConversationEpisode,
   addKarakuriObservationEpisode,
   ensureKarakuriUser,
   getKarakuriPersonByDisplayName,
   invalidateUserContextCache,
+  type KarakuriCommitment,
+  type KarakuriCommitmentInput,
   type KarakuriPersonContext,
+  updateKarakuriCommitmentStatus,
   updateKarakuriPlatformDisplayName,
   updateUserMemo,
   updateUserNickname,
@@ -49,6 +54,12 @@ const INFO_COMMANDS = new Set([
   'event',
 ]);
 const SELF_AGENT_ID = '1470446478261747854';
+const COMMITMENT_PRIORITY_WINDOW_MS = 90 * 60 * 1000;
+const COMMITMENT_GRACE_WINDOW_MS = 6 * 60 * 60 * 1000;
+const KNOWN_LOCATION_NODES: Record<string, string> = {
+  'ファミレス「ジョイ」': '24-56',
+  ファミレスジョイ: '24-56',
+};
 
 export interface ParsedKarakuriChoice extends Record<string, unknown> {
   command?: string;
@@ -90,7 +101,7 @@ export async function runKarakuriWorkflow(
   notification: string,
   opts: KarakuriWorkflowOptions
 ): Promise<void> {
-  const today = new Date().toISOString().split('T')[0];
+  const today = currentJstDate();
   const now = currentJstTime();
   const hasChoices = HAS_CHOICES_RE.test(notification);
   const turnKey = opts.messageId ? `karakuri:${opts.messageId}` : `karakuri:${Date.now()}`;
@@ -112,10 +123,21 @@ export async function runKarakuriWorkflow(
   });
 
   // ─── Step 1: 前処理（機械的）────────────────────────────────────────
-  const [emotion, memoryEntries] = await Promise.all([getEmotion(), getMemoryEntries(3)]);
+  const [emotion, memoryEntries, pendingCommitments] = await Promise.all([
+    getEmotion(),
+    getMemoryEntries(3),
+    getPendingKarakuriCommitments(8).catch((e) => {
+      console.error('[karakuri] getPendingKarakuriCommitments failed:', e);
+      return [] as KarakuriCommitment[];
+    }),
+  ]);
 
   const emotionText = formatEmotion(emotion);
-  const memoryText = await buildKarakuriMemoryContext(notification, memoryEntries);
+  const memoryText = await buildKarakuriMemoryContext(
+    notification,
+    memoryEntries,
+    pendingCommitments
+  );
 
   // エージェント情報をusersテーブルに登録
   const people: KarakuriPersonContext[] = [];
@@ -156,7 +178,8 @@ export async function runKarakuriWorkflow(
     }
   }
 
-  for (const message of parsedNotification.conversation_messages) {
+  const messages = mergeCommitmentMessages(parsedNotification.conversation_messages, notification);
+  for (const message of messages) {
     if (isSelfSpeaker(message.speaker) || people.some((p) => p.displayName === message.speaker)) {
       continue;
     }
@@ -179,6 +202,14 @@ export async function runKarakuriWorkflow(
     parsedNotification.conversation_messages,
     people
   );
+  await addCommitmentsFromNotification(
+    today,
+    requestLog?.id,
+    notification,
+    parsedNotification,
+    people
+  );
+  await markArrivedCommitments(notification, pendingCommitments);
 
   // ─── Step 2: 選択肢チェック（機械的）────────────────────────────────
   if (!hasChoices) {
@@ -207,6 +238,12 @@ export async function runKarakuriWorkflow(
   );
   decision = enforceNicknameGuardrail(decision, people);
   decision = normalizeKarakuriDecision(decision, parsedNotification);
+  decision = prioritizeDueCommitment(
+    decision,
+    pendingCommitments,
+    parsedNotification,
+    notification
+  );
   console.log(
     `[karakuri] LLM decision: ${decision.command} ${decision.args} | ${decision.thought}`
   );
@@ -518,6 +555,87 @@ export function validateKarakuriDecision(
   return null;
 }
 
+export function extractKarakuriCommitments(
+  baseDateJst: string,
+  activityLogId: string | undefined,
+  notification: string,
+  parsedNotification: ParsedKarakuriNotification,
+  people: KarakuriPersonContext[]
+): KarakuriCommitmentInput[] {
+  const commitments: KarakuriCommitmentInput[] = [];
+  const seen = new Set<string>();
+
+  const messages = mergeCommitmentMessages(parsedNotification.conversation_messages, notification);
+  for (const message of messages) {
+    if (isSelfSpeaker(message.speaker)) continue;
+    const dueAt = parseCommitmentDueAt(message.message, baseDateJst);
+    if (!dueAt) continue;
+    if (!/(約束|待ち合わせ|会いましょう|お会いしましょう|向かいましょう)/.test(message.message)) {
+      continue;
+    }
+
+    const locationName = extractCommitmentLocation(message.message);
+    const targetNodeId = locationName ? KNOWN_LOCATION_NODES[locationName] : undefined;
+    const person = findPersonBySpeaker(message.speaker, people);
+    const description = buildCommitmentDescription(message.speaker, message.message, locationName);
+    const dedupeKey = `${dueAt}|${person?.agentId ?? message.speaker}|${description}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    commitments.push({
+      partner_agent_id: person?.agentId ?? null,
+      partner_name: person?.nickname || person?.displayName || message.speaker,
+      description,
+      due_at_world: dueAt,
+      location_name: locationName ?? null,
+      target_node_id: targetNodeId ?? null,
+      source_activity_log_id: activityLogId ?? null,
+      source_text: message.message,
+      metadata: {
+        extractor: 'karakuri-workflow',
+        raw_notification: firstLine(notification),
+      },
+    });
+  }
+
+  return commitments;
+}
+
+export function prioritizeDueCommitment(
+  decision: KarakuriDecision,
+  commitments: KarakuriCommitment[],
+  parsedNotification: ParsedKarakuriNotification,
+  notification: string,
+  now = new Date()
+): KarakuriDecision {
+  const hasMoveChoice = parsedNotification.choices.some((choice) => choice.command === 'move');
+  if (!hasMoveChoice) return decision;
+
+  const currentNode = parseCurrentNode(notification);
+  const dueCommitment = commitments.find((commitment) => {
+    if (commitment.status !== 'pending' || !commitment.target_node_id || !commitment.due_at_world) {
+      return false;
+    }
+    if (currentNode === commitment.target_node_id) return false;
+    const dueTime = new Date(commitment.due_at_world).getTime();
+    if (!Number.isFinite(dueTime)) return false;
+    const diff = dueTime - now.getTime();
+    return diff <= COMMITMENT_PRIORITY_WINDOW_MS && diff >= -COMMITMENT_GRACE_WINDOW_MS;
+  });
+
+  if (!dueCommitment?.target_node_id) return decision;
+
+  return {
+    ...decision,
+    command: 'move',
+    args: dueCommitment.target_node_id,
+    message: undefined,
+    thought: `約束優先: ${dueCommitment.description}`.slice(0, 60),
+    dP: Math.max(decision.dP ?? 0, 0.03),
+    dA: Math.max(decision.dA ?? 0, 0.08),
+  };
+}
+
 async function addSkippedActionLog(input: {
   opts: KarakuriWorkflowOptions;
   turnKey: string;
@@ -577,6 +695,55 @@ async function addObservedSpeechEpisodes(
   }
 }
 
+async function addCommitmentsFromNotification(
+  today: string,
+  activityLogId: string | undefined,
+  notification: string,
+  parsedNotification: ParsedKarakuriNotification,
+  people: KarakuriPersonContext[]
+): Promise<void> {
+  const commitments = extractKarakuriCommitments(
+    today,
+    activityLogId,
+    notification,
+    parsedNotification,
+    people
+  );
+  for (const commitment of commitments) {
+    try {
+      await addKarakuriCommitment(commitment);
+    } catch (e) {
+      console.error('[karakuri] addKarakuriCommitment failed:', e);
+    }
+  }
+}
+
+async function markArrivedCommitments(
+  notification: string,
+  commitments: KarakuriCommitment[]
+): Promise<void> {
+  const currentNode = parseCurrentNode(notification);
+  if (!currentNode) return;
+  const now = Date.now();
+  for (const commitment of commitments) {
+    if (
+      commitment.status !== 'pending' ||
+      commitment.target_node_id !== currentNode ||
+      !commitment.due_at_world
+    ) {
+      continue;
+    }
+    const dueTime = new Date(commitment.due_at_world).getTime();
+    if (!Number.isFinite(dueTime)) continue;
+    if (dueTime - now > COMMITMENT_PRIORITY_WINDOW_MS) continue;
+    await updateKarakuriCommitmentStatus(
+      commitment.id,
+      'fulfilled',
+      'arrived at target node'
+    ).catch((e) => console.error('[karakuri] commitment fulfillment update failed:', e));
+  }
+}
+
 function isSelfSpeaker(speaker: string): boolean {
   return ['AIニケちゃん', 'ニケ', 'あなた'].includes(speaker.trim());
 }
@@ -591,6 +758,79 @@ function findPersonBySpeaker(
       .filter((name): name is string => Boolean(name))
       .includes(normalizedSpeaker)
   );
+}
+
+function parseCommitmentDueAt(text: string, baseDateJst: string): string | null {
+  const match = text.match(/(今日|明日)?\s*(午前|午後)?\s*(\d{1,2})\s*時(?:\s*(\d{1,2})\s*分)?/);
+  if (!match) return null;
+
+  const dayWord = match[1] ?? '';
+  const meridiem = match[2] ?? '';
+  let hour = Number(match[3]);
+  const minute = match[4] ? Number(match[4]) : 0;
+  if (!Number.isInteger(hour) || hour < 0 || hour > 24) return null;
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+  if (meridiem === '午後' && hour < 12) hour += 12;
+  if (meridiem === '午前' && hour === 12) hour = 0;
+
+  const date = dayWord === '明日' ? addDaysToDate(baseDateJst, 1) : baseDateJst;
+  return `${date}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00+09:00`;
+}
+
+function mergeCommitmentMessages(
+  parsedMessages: ReturnType<typeof parseConversationMessages>,
+  notification: string
+): ReturnType<typeof parseConversationMessages> {
+  const messages = [...parsedMessages];
+  const fullMessage = notification.match(
+    /(?:^|[\s\u3000])([^:\s\u3000]{1,40}):\s*「([\s\S]*?)」\s*(?:選択肢[：:]|karakuri-world\s+スキル|$)/
+  );
+  if (fullMessage) {
+    const speaker = fullMessage[1].trim();
+    const message = fullMessage[2];
+    const existingIndex = messages.findIndex(
+      (m) => m.speaker === speaker && message.startsWith(m.message)
+    );
+    if (existingIndex >= 0) {
+      messages[existingIndex] = { speaker, message };
+    } else {
+      messages.push({ speaker, message });
+    }
+  }
+  return messages;
+}
+
+function extractCommitmentLocation(text: string): string | null {
+  if (/ファミレス[「『]?ジョイ[」』]?/.test(text)) return 'ファミレス「ジョイ」';
+  const quoted = text.match(/(?:場所|どこ|で|に|へ)?\s*([^\s、。]*[「『][^」』]+[」』])/);
+  if (quoted?.[1]) return quoted[1].replace(/[『』]/g, (m) => (m === '『' ? '「' : '」'));
+  const simple = text.match(/(駅前|公民館|図書館|水族館|ゲーセン|ゲームセンター|パン屋|映画館)/);
+  return simple?.[1] ?? null;
+}
+
+function buildCommitmentDescription(
+  speaker: string,
+  message: string,
+  locationName: string | null
+): string {
+  const place = locationName ? `${locationName}で` : '';
+  const topic = /探索|巡/.test(message) ? '町探索' : '待ち合わせ';
+  return `${speaker}さんと${place}${topic}`.replace(/さんさん/g, 'さん');
+}
+
+function parseCurrentNode(notification: string): string | null {
+  return notification.match(/現在地:\s*([0-9]+-[0-9]+)/)?.[1] ?? null;
+}
+
+function addDaysToDate(date: string, days: number): string {
+  const base = new Date(`${date}T00:00:00+09:00`);
+  base.setUTCDate(base.getUTCDate() + days);
+  return new Intl.DateTimeFormat('sv-SE', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    timeZone: 'Asia/Tokyo',
+  }).format(base);
 }
 
 function enforceNicknameGuardrail(decision: KarakuriDecision, people: KarakuriPersonContext[]) {
@@ -650,6 +890,15 @@ function currentJstTime(): string {
     hour12: false,
     timeZone: 'Asia/Tokyo',
   });
+}
+
+function currentJstDate(): string {
+  return new Intl.DateTimeFormat('sv-SE', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    timeZone: 'Asia/Tokyo',
+  }).format(new Date());
 }
 
 function firstLine(text: string): string {

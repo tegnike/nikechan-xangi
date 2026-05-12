@@ -139,10 +139,67 @@ export interface KarakuriKnowledgeEdge {
   last_seen_at?: string | null;
 }
 
+export interface KarakuriCommitment {
+  id: string;
+  agent_id?: string | null;
+  partner_agent_id?: string | null;
+  partner_name?: string | null;
+  description: string;
+  due_at_world?: string | null;
+  location_name?: string | null;
+  target_node_id?: string | null;
+  status: 'pending' | 'fulfilled' | 'missed' | 'cancelled';
+  source_activity_log_id?: string | null;
+  source_text?: string | null;
+  metadata?: JsonObject | null;
+}
+
+export interface KarakuriCommitmentInput {
+  partner_agent_id?: string | null;
+  partner_name?: string | null;
+  description: string;
+  due_at_world?: string | null;
+  location_name?: string | null;
+  target_node_id?: string | null;
+  source_activity_log_id?: string | null;
+  source_text?: string | null;
+  metadata?: JsonObject;
+}
+
 export async function getRecentKarakuriActivityLogs(limit = 8): Promise<KarakuriActivityLogRow[]> {
   return supabaseGet<KarakuriActivityLogRow[]>(
     `karakuri_activity_logs?order=message_created_at.desc.nullslast,created_at.desc&limit=${limit}&select=id,message_created_at,message_type,raw_content,parsed`
   );
+}
+
+export async function addKarakuriCommitment(
+  input: KarakuriCommitmentInput
+): Promise<KarakuriCommitment | null> {
+  const rows = await supabasePost<KarakuriCommitment[]>('karakuri_commitments', {
+    agent_id: 'nike',
+    ...input,
+    status: 'pending',
+    metadata: input.metadata ?? {},
+  });
+  return rows[0] ?? null;
+}
+
+export async function getPendingKarakuriCommitments(limit = 8): Promise<KarakuriCommitment[]> {
+  return supabaseGet<KarakuriCommitment[]>(
+    `karakuri_commitments?agent_id=eq.nike&status=eq.pending&order=due_at_world.asc.nullslast,created_at.asc&limit=${limit}&select=*`
+  );
+}
+
+export async function updateKarakuriCommitmentStatus(
+  id: string,
+  status: KarakuriCommitment['status'],
+  note?: string
+): Promise<void> {
+  await supabasePatch(`karakuri_commitments?id=eq.${encodeURIComponent(id)}`, {
+    status,
+    updated_at: new Date().toISOString(),
+    metadata: note ? { status_note: note } : undefined,
+  });
 }
 
 export async function searchKarakuriMemoryNodes(
@@ -236,7 +293,8 @@ export async function getKarakuriKnowledgeEdges(
 
 export async function buildKarakuriMemoryContext(
   notification: string,
-  shortTermEntries: MemoryEntry[]
+  shortTermEntries: MemoryEntry[],
+  commitments: KarakuriCommitment[] = []
 ): Promise<string> {
   const [workingLogs, unprocessedMatches, episodeMatches, graphEdges] = await Promise.all([
     getRecentKarakuriActivityLogs(8).catch(() => []),
@@ -248,6 +306,9 @@ export async function buildKarakuriMemoryContext(
   return [
     '## ワーキングメモリ（直近のDiscord入出力）',
     formatWorkingLogs(workingLogs),
+    '',
+    '## 有効な約束・予定（通常記憶より優先）',
+    formatKarakuriCommitments(commitments),
     '',
     '## 短期記憶（直近の行動メモ）',
     formatMemory(shortTermEntries),
@@ -261,6 +322,22 @@ export async function buildKarakuriMemoryContext(
     '## ナレッジグラフ',
     formatKnowledgeEdges(graphEdges),
   ].join('\n');
+}
+
+export function formatKarakuriCommitments(commitments: KarakuriCommitment[]): string {
+  const pending = commitments.filter((c) => c.status === 'pending');
+  if (!pending.length) return '（なし）';
+  return pending
+    .map((commitment) => {
+      const due = commitment.due_at_world
+        ? commitment.due_at_world.replace('T', ' ').replace(/:00(?:\+09:00|Z)?$/, '')
+        : '時刻未定';
+      const partner = commitment.partner_name ? ` 相手=${commitment.partner_name}` : '';
+      const place = commitment.location_name ? ` 場所=${commitment.location_name}` : '';
+      const node = commitment.target_node_id ? ` node=${commitment.target_node_id}` : '';
+      return `- ${due}${partner}${place}${node}: ${commitment.description}`;
+    })
+    .join('\n');
 }
 
 function formatWorkingLogs(logs: KarakuriActivityLogRow[]): string {
