@@ -84,6 +84,8 @@ ${personText}
 通知の選択肢から次のアクションを1つ選んでください。
 **重要な制約**:
 - perception / actions / map / world-agents / status / nearby-agents / active-conversations / event は情報収集コマンドです。直近の記憶でこれらを実行した場合は、その情報に基づいて move / action / conversation-start / transfer 等の実際のアクションを選択してください。連続実行は避けてください。
+- 選択肢に move が含まれる場合、args の target_node_id は通知に出た隣接ノード候補に限定されません。get_map / status / 記憶で分かっている到達可能な目的地ノード、建物入口、他エージェントの近くのノードを直接指定できます。サーバーが最短経路を自動計算します。
+- 明確な目的地があるときは、1マスずつ移動せず、遠方の target_node_id を直接指定してください。隣接ノードへの移動は、目的地が不明な探索や位置の微調整に限ります。
 - 同じコマンドを3回以上連続して選択しないでください。
 
 **以下のJSON形式のみで応答してください。前後にテキストを出力しないこと。**
@@ -100,6 +102,7 @@ ${personText}
 
 ## コマンド別 args / message の指定例
 - move: args="4-1", message=null
+- move: args="18-15", message=null（既知の遠方目的地へ直接移動。隣接マス限定ではない）
 - action: args="sleep-house-a", message=null（可変時間なら args="sleep-house-a 120"）
 - use-item: args="apple", message=null
 - wait: args="3", message=null
