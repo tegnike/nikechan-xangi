@@ -1193,6 +1193,7 @@ ${draft.text}
 ## セルフレビューメモ
 ${draft.selfReviewMemo}
 
+読者理解度は、source-collector結果やセルフレビューメモを知らない初見読者が、レビュー対象本文だけを読んだ場合として判定してください。
 JSONだけを返してください。Markdownは禁止です。`;
 
   const result = await runJsonResult<Partial<TweetReviewResult>>(prompt, sessionId);
@@ -1230,6 +1231,7 @@ ${texts || 'スキップ判定のみ'}
 ## 判断理由
 ${item.reason}
 
+読者理解度は、元ツイート・人物文脈を知らない初見読者が、レビュー対象本文だけを読んだ場合として判定してください。
 JSONだけを返してください。Markdownは禁止です。`;
 
   const result = await runJsonResult<Partial<TweetReviewResult>>(prompt, sessionId);

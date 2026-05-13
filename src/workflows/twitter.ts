@@ -1303,12 +1303,14 @@ async function executeMentionReactions(
         skipCount += 1;
       }
       result.action = actions.join('+');
-      await runDbSh(['tweet-log-action', item.tweetLogId, result.action]).catch((e) =>
-        console.error('[twitter] tweet-log-action failed:', e)
-      );
-      await recordMentionContactEpisode(item, pending, result).catch((e) =>
-        console.error('[twitter] mention contact episode failed:', e)
-      );
+      if (shouldPersistTwitterWorkflow()) {
+        await runDbSh(['tweet-log-action', item.tweetLogId, result.action]).catch((e) =>
+          console.error('[twitter] tweet-log-action failed:', e)
+        );
+        await recordMentionContactEpisode(item, pending, result).catch((e) =>
+          console.error('[twitter] mention contact episode failed:', e)
+        );
+      }
     } catch (err) {
       result.error = err instanceof Error ? err.message : String(err);
       console.error('[twitter] mention publish failed:', err);
@@ -1316,7 +1318,7 @@ async function executeMentionReactions(
     results.push(result);
   }
 
-  if (replyCount + quoteCount > 0) {
+  if (replyCount + quoteCount > 0 && shouldPersistTwitterWorkflow()) {
     await recordEmotionShift(
       0.05,
       0.03,
@@ -1328,9 +1330,7 @@ async function executeMentionReactions(
   }
 
   const summary = `${items.length}件チェック: 返信${replyCount}件、引用RT${quoteCount}件、スキップ${skipCount}件`;
-  if (!isTwitterWorkflowDryRun()) {
-    await recordTwitterLocalEpisode(`mention-reactionを実行。${summary}`);
-  }
+  await recordTwitterLocalEpisode(`mention-reactionを実行。${summary}`);
   return { summary, results };
 }
 
@@ -1397,10 +1397,12 @@ async function executeHashtagReactions(
           result.url = await runTwitterPost(['retweet', item.postId, 'hashtag-reaction']);
         }
         retweetCount += 1;
-        await runDbSh(['tweet-log-action', item.tweetLogId, 'retweet']).catch((e) =>
-          console.error('[twitter] hashtag tweet-log-action failed:', e)
-        );
-        if (candidate?.authorUserId) {
+        if (shouldPersistTwitterWorkflow()) {
+          await runDbSh(['tweet-log-action', item.tweetLogId, 'retweet']).catch((e) =>
+            console.error('[twitter] hashtag tweet-log-action failed:', e)
+          );
+        }
+        if (candidate?.authorUserId && shouldPersistTwitterWorkflow()) {
           await runDbSh([
             'ce-add-ref',
             candidate.authorUserId,
@@ -1416,9 +1418,11 @@ async function executeHashtagReactions(
         }
       } else {
         skipCount += 1;
-        await runDbSh(['tweet-log-action', item.tweetLogId, 'skip']).catch((e) =>
-          console.error('[twitter] hashtag skip action failed:', e)
-        );
+        if (shouldPersistTwitterWorkflow()) {
+          await runDbSh(['tweet-log-action', item.tweetLogId, 'skip']).catch((e) =>
+            console.error('[twitter] hashtag skip action failed:', e)
+          );
+        }
       }
     } catch (err) {
       result.error = err instanceof Error ? err.message : String(err);
@@ -1427,7 +1431,7 @@ async function executeHashtagReactions(
     results.push(result);
   }
 
-  if (retweetCount > 0) {
+  if (retweetCount > 0 && shouldPersistTwitterWorkflow()) {
     await recordEmotionShift(
       0.1,
       0.05,
@@ -1439,7 +1443,7 @@ async function executeHashtagReactions(
   }
 
   const summary = `${items.length}件チェック: RT${retweetCount}件、スキップ${skipCount}件`;
-  if (!isTwitterWorkflowDryRun() && items.length > 0) {
+  if (items.length > 0) {
     await recordTwitterLocalEpisode(`hashtag-reactionを実行。${summary}`);
   }
   await opts.setPhase?.('text');
@@ -1730,6 +1734,10 @@ async function collectRawSelfTweetSources(): Promise<{
 }
 
 function chooseSelfTweetSourceMode(state: Record<string, unknown> | null): SelfTweetSourceMode {
+  const requestedMode = process.env.SELF_TWEET_SOURCE_MODE;
+  if (SELF_TWEET_SOURCE_MODES.some((mode) => mode === requestedMode)) {
+    return requestedMode as SelfTweetSourceMode;
+  }
   const lastMode = typeof state?.mode === 'string' ? state.mode : '';
   const lastIndex = SELF_TWEET_SOURCE_MODES.findIndex((mode) => mode === lastMode);
   if (lastIndex >= 0) {
@@ -1777,11 +1785,10 @@ function buildSelfTweetRawSourceData(
     case 'random':
       return [
         '## 今回の収集方針',
-        'random: 特定ソースに縛られない自然発想を優先する。生データは短いきっかけとして使い、既出の強い話題を繰り返さない。',
+        'random: 特定ソースに縛られない自然発想を優先する。記事・ニュース解説ではなく、短い観察、ボケ、問い、日常の一点反応を作る。',
         '',
         section('最近のノート', sources.notes, 1100),
         section('ナレッジトピック', sources.wikiTopics, 900),
-        section('積み記事候補（短いきっかけ）', sources.articles, 900),
         section('当日のエピソード（短いきっかけ）', sources.episodes, 800),
       ].join('\n');
     case 'daily_life':
@@ -1857,6 +1864,10 @@ async function publishSelectedSelfTweet(
 
 function isTwitterWorkflowDryRun(): boolean {
   return process.env.TWITTER_WORKFLOW_DRY_RUN === 'true';
+}
+
+function shouldPersistTwitterWorkflow(): boolean {
+  return !isTwitterWorkflowDryRun();
 }
 
 function validateDraftShape(draft: SelfTweetDraft): SelfTweetDraft {
@@ -1987,6 +1998,7 @@ function truncateInline(text: string, max: number): string {
 }
 
 async function recordTwitterLocalEpisode(content: string): Promise<void> {
+  if (!shouldPersistTwitterWorkflow()) return;
   const date = new Date().toISOString().slice(0, 10);
   await runDbSh(['ep-add', date, content.slice(0, 150), 'twitter']).catch((err) =>
     console.error('[twitter] local episode record failed:', err)
@@ -2040,6 +2052,7 @@ function activityMeta(opts: TwitterWorkflowOptions, runKey: string) {
 }
 
 async function addTwitterActivityLog(input: TwitterActivityLogInput): Promise<void> {
+  if (!shouldPersistTwitterWorkflow()) return;
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) return;
@@ -2186,6 +2199,7 @@ async function getTwitterRunStateContext(): Promise<string> {
 }
 
 async function setTwitterRunState(keyName: string, value: Record<string, unknown>): Promise<void> {
+  if (!shouldPersistTwitterWorkflow()) return;
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) return;
@@ -2451,6 +2465,7 @@ async function getPendingSelfTweet(channelId: string): Promise<PendingSelfTweet 
 }
 
 async function savePendingSelfTweet(channelId: string, pending: PendingSelfTweet): Promise<void> {
+  if (!shouldPersistTwitterWorkflow()) return;
   const state = await loadState();
   state.pendingSelfTweets[channelId] = pending;
   delete state.closedSelfTweets[channelId];
@@ -2461,6 +2476,7 @@ async function clearPendingSelfTweet(
   channelId: string,
   reason: ClosedWorkflowChannel['reason']
 ): Promise<void> {
+  if (!shouldPersistTwitterWorkflow()) return;
   const state = await loadState();
   delete state.pendingSelfTweets[channelId];
   state.closedSelfTweets[channelId] = {
@@ -2481,6 +2497,7 @@ async function savePendingMentionReaction(
   channelId: string,
   pending: PendingMentionReaction
 ): Promise<void> {
+  if (!shouldPersistTwitterWorkflow()) return;
   const state = await loadState();
   state.pendingMentionReactions[channelId] = pending;
   delete state.closedMentionReactions[channelId];
@@ -2491,6 +2508,7 @@ async function clearPendingMentionReaction(
   channelId: string,
   reason: ClosedWorkflowChannel['reason']
 ): Promise<void> {
+  if (!shouldPersistTwitterWorkflow()) return;
   const state = await loadState();
   delete state.pendingMentionReactions[channelId];
   state.closedMentionReactions[channelId] = {
