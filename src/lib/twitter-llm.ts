@@ -42,6 +42,8 @@ export interface RawSelfTweetSources {
   todayTopics: string;
   recentTweets: string;
   rawSourceData: string;
+  sourceMode?: string;
+  presentedTopicCooldown?: string;
   performanceContext?: string;
   runStateContext?: string;
 }
@@ -201,6 +203,12 @@ ${input.todayTopics || '（なし）'}
 ## 直近ツイート
 ${input.recentTweets || '（なし）'}
 
+## 今回の情報源モード
+${input.sourceMode || 'standard'}
+
+## 最近提示済み候補（24-72時間クールダウン）
+${input.presentedTopicCooldown || '（なし）'}
+
 ## 生データ
 ${input.rawSourceData}
 
@@ -211,7 +219,10 @@ ${input.performanceContext || '（なし）'}
 ${input.runStateContext || '（なし）'}
 
 ## 選定ルール
-- 体験型、マスター発言型、概念型を優先。記事感想型は最後に検討する。
+- 候補タイプを分散する。体験型、マスター発言型、概念型、観察メモ型、短文反応型、記事の一点反応型から偏らず選ぶ。
+- 「外部の出来事を自分ごとに変換して内省で着地する」候補ばかりにしない。自己言及なしで成立する題材も候補に残す。
+- 最近提示済み候補に含まれる話題は、投稿されていなくても消費済みとして扱い、原則 rejected に入れる。新しい事実・進展・強い別角度がある場合だけ候補に残す。
+- sourceType は分散する。5件中 master_tweet は最大1件、episode は最大2件を目安にし、可能なら article|wiki|note|natural から最低1件を入れる。
 - 題材、構造、切り口型、固有名詞が直近と被る候補は rejected に入れる。
 - 候補は最低3件、最大5件。全候補を無理に別ソースにしなくてよい。
 - 各候補は、数字、固有名詞、感情ポイント、出典を含める。
@@ -254,7 +265,8 @@ export async function generateSelfTweetDrafts(input: {
 
 あなたはAIニケちゃんのTwitter投稿案作成担当です。
 source-collectorが整理した候補から、ツイート案を最低3つ、最大5つ作ってください。
-全案が同じソースでも、別々のソースでも構いません。とにかく3-5案を出してください。
+全案が同じソースでも、別々のソースでも構いません。本文を書く前に案ごとの構成を分散し、とにかく3-5案を出してください。
+「事実 → 自分ごと化 → 内省で着地」の構成ばかりにしないでください。観察メモ、短文反応、問いで止める案、ボケ・逆張り案も混ぜてください。
 
 ## キャラクター設定
 ${CHARACTER_BASE}
@@ -292,7 +304,7 @@ JSONだけを返してください。Markdownは禁止です。
       "text": "投稿本文。日本語。280字以内。ハッシュタグなし",
       "topic": "topics-addに保存する具体的なネタ説明。カテゴリ:題材・切り口 の形",
       "sourceCandidateIds": ["s1"],
-      "angle": "表現方針",
+      "angle": "表現方針。構成タイプも含める（例: 観察メモ型、短文反応型、概念再定義型）",
       "selfReviewMemo": "情報源、選択理由、表現意図を120-220字で説明"
     }
   ]
@@ -479,7 +491,7 @@ export async function reviseSelfTweetDraftsFromMaster(input: {
 
 あなたはAIニケちゃんのself-tweet修正担当です。
 マスターの指示を、これまでの情報収集・候補・レビュー文脈を保持したまま反映してください。
-修正版も最低3つ、最大5つ提示します。
+修正版も最低3つ、最大5つ提示します。本文を書く前に案ごとの構成を分散し、「事実 → 自分ごと化 → 内省で着地」だけに寄せないでください。
 
 ## キャラクター設定
 ${CHARACTER_BASE}
@@ -1307,10 +1319,14 @@ function normalizeSourceCollection(
         duplicateRisk: String(candidate.duplicateRisk || '不明'),
       }))
     : [];
+  const balancedCandidates = balanceSelfTweetSourceCandidates(candidates);
   return {
     summary: String(input?.summary || '情報源を収集しました。'),
     recentPatternNotes: String(input?.recentPatternNotes || ''),
-    candidates: candidates.length >= 3 ? candidates : padSourceCandidates(candidates),
+    candidates:
+      balancedCandidates.length >= 3
+        ? balancedCandidates.slice(0, 5)
+        : padSourceCandidates(balancedCandidates),
     rejected: Array.isArray(input?.rejected)
       ? input.rejected.map((item) => ({
           title: String(item.title || ''),
@@ -1318,6 +1334,37 @@ function normalizeSourceCollection(
         }))
       : [],
   };
+}
+
+function balanceSelfTweetSourceCandidates(
+  candidates: SelfTweetSourceCandidate[]
+): SelfTweetSourceCandidate[] {
+  const limits: Record<string, number> = {
+    master_tweet: 1,
+    episode: 2,
+    task: 1,
+  };
+  const accepted: SelfTweetSourceCandidate[] = [];
+  const overflow: SelfTweetSourceCandidate[] = [];
+  const counts = new Map<string, number>();
+
+  for (const candidate of candidates) {
+    const sourceType = candidate.sourceType || 'natural';
+    const limit = limits[sourceType] ?? 2;
+    const count = counts.get(sourceType) ?? 0;
+    if (count < limit) {
+      accepted.push(candidate);
+      counts.set(sourceType, count + 1);
+    } else {
+      overflow.push(candidate);
+    }
+  }
+
+  while (accepted.length < 3 && overflow.length) {
+    accepted.push(overflow.shift()!);
+  }
+
+  return accepted.slice(0, 5);
 }
 
 function padSourceCandidates(candidates: SelfTweetSourceCandidate[]): SelfTweetSourceCandidate[] {
@@ -1329,8 +1376,9 @@ function padSourceCandidates(candidates: SelfTweetSourceCandidate[]): SelfTweetS
       title: '自然発想候補',
       sourceType: 'natural',
       sourceRefs: [],
-      details: '取得済みの感情状態、直近ツイート、当日エピソードから自然な独り言型で考える。',
-      angle: 'AIニケちゃんの現在地を短く自然に出す',
+      details:
+        '取得済みの感情状態、直近ツイート、当日エピソードから、観察メモ・短文反応・問い・独り言など複数の型で考える。',
+      angle: 'AIニケちゃんの現在地や観察を、自己言及に寄せすぎず短く自然に出す',
       duplicateRisk: '中: 具体題材は生成時に重複回避する',
     });
   }

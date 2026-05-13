@@ -34,6 +34,20 @@ const WORKDIR = process.env.WORKSPACE_PATH || process.cwd();
 const DATA_DIR = process.env.DATA_DIR || process.env.XANGI_DATA_DIR || join(WORKDIR, '.xangi');
 const STATE_PATH = join(DATA_DIR, 'twitter-workflow-state.json');
 const FORBIDDEN_TEXT_PATTERNS = [/!discord/i, /!schedule/i, /<#\d+>/];
+const SELF_TWEET_SOURCE_MODES = ['daily_life', 'tech', 'memory', 'random'] as const;
+const PRESENTED_TOPIC_COOLDOWN_HOURS = 72;
+const PRESENTED_TOPIC_COOLDOWN_LIMIT = 40;
+
+type SelfTweetSourceMode = (typeof SELF_TWEET_SOURCE_MODES)[number];
+
+interface PresentedSelfTweetTopic {
+  at: string;
+  topic: string;
+  titles: string[];
+  sourceTypes: string[];
+  angle?: string;
+  textPreview: string;
+}
 
 export interface TwitterSentReport {
   messageId?: string;
@@ -63,6 +77,7 @@ interface PendingSelfTweet {
   emotionText: string;
   todayTopics: string;
   recentTweets: string;
+  sourceMode: SelfTweetSourceMode;
   personContext: string;
   performanceContext: string;
   runStateContext: string;
@@ -131,6 +146,7 @@ export async function runSelfTweetWorkflow(opts: TwitterWorkflowOptions): Promis
         person_context: pending.personContext,
         performance_context: pending.performanceContext,
         run_state_context: pending.runStateContext,
+        source_mode: pending.sourceMode,
       },
     });
     await addTwitterActivityLog({
@@ -185,6 +201,7 @@ export async function runSelfTweetWorkflow(opts: TwitterWorkflowOptions): Promis
         person_context: pending.personContext,
         performance_context: pending.performanceContext,
         run_state_context: pending.runStateContext,
+        source_mode: pending.sourceMode,
         drafts: pending.drafts,
       },
     });
@@ -198,8 +215,14 @@ export async function runSelfTweetWorkflow(opts: TwitterWorkflowOptions): Promis
     });
     await setTwitterRunState('self_tweet_last_plan', {
       at: pending.createdAt,
+      source_mode: pending.sourceMode,
       source_types: pending.sourceCollection.candidates.map((candidate) => candidate.sourceType),
       draft_count: pending.drafts.length,
+    });
+    await appendPresentedSelfTweetTopics(pending);
+    await setTwitterRunState('self_tweet_last_source_mode', {
+      at: pending.createdAt,
+      mode: pending.sourceMode,
     });
     await opts.setPhase?.('text');
     await opts.sendReport(formatApprovalRequest(pending));
@@ -1474,6 +1497,8 @@ async function createPendingSelfTweet(
     todayTopics: rawSources.todayTopics,
     recentTweets: rawSources.recentTweets,
     rawSourceData: rawSources.rawSourceData,
+    sourceMode: rawSources.sourceMode,
+    presentedTopicCooldown: rawSources.presentedTopicCooldown,
     performanceContext: rawSources.performanceContext,
     runStateContext: rawSources.runStateContext,
   });
@@ -1501,6 +1526,7 @@ async function createPendingSelfTweet(
     emotionText,
     todayTopics: rawSources.todayTopics,
     recentTweets: rawSources.recentTweets,
+    sourceMode: rawSources.sourceMode,
     personContext,
     performanceContext: rawSources.performanceContext,
     runStateContext: rawSources.runStateContext,
@@ -1645,11 +1671,18 @@ async function prepareDrafts(
 async function collectRawSelfTweetSources(): Promise<{
   todayTopics: string;
   recentTweets: string;
+  sourceMode: SelfTweetSourceMode;
+  presentedTopicCooldown: string;
   performanceContext: string;
   runStateContext: string;
   rawSourceData: string;
 }> {
   const today = new Date().toISOString().slice(0, 10);
+  const [lastSourceModeState, presentedTopicCooldown] = await Promise.all([
+    getTwitterRunStateValue('self_tweet_last_source_mode'),
+    getRecentPresentedTopicCooldown(),
+  ]);
+  const sourceMode = chooseSelfTweetSourceMode(lastSourceModeState);
   const [
     todayTopics,
     recentTweets,
@@ -1676,33 +1709,93 @@ async function collectRawSelfTweetSources(): Promise<{
     getTwitterRunStateContext(),
   ]);
 
-  const rawSourceData = [
-    '## 当日のエピソード',
-    truncateBlock(episodes, 2500),
-    '',
-    '## 進行中タスク',
-    truncateBlock(tasks, 1600),
-    '',
-    '## 最近のノート',
-    truncateBlock(notes, 1600),
-    '',
-    '## ナレッジトピック',
-    truncateBlock(wikiTopics, 1600),
-    '',
-    '## 積み記事候補',
-    truncateBlock(articles, 1600),
-    '',
-    '## マスターの直近ツイート',
-    truncateBlock(masterTweets, 2000),
-  ].join('\n');
+  const rawSourceData = buildSelfTweetRawSourceData(sourceMode, {
+    episodes,
+    tasks,
+    notes,
+    wikiTopics,
+    articles,
+    masterTweets,
+  });
 
   return {
     todayTopics: truncateBlock(todayTopics, 1800),
     recentTweets: truncateBlock(recentTweets, 1800),
+    sourceMode,
+    presentedTopicCooldown,
     performanceContext: truncateBlock(performanceContext, 2200),
     runStateContext: truncateBlock(runStateContext, 2200),
     rawSourceData,
   };
+}
+
+function chooseSelfTweetSourceMode(state: Record<string, unknown> | null): SelfTweetSourceMode {
+  const lastMode = typeof state?.mode === 'string' ? state.mode : '';
+  const lastIndex = SELF_TWEET_SOURCE_MODES.findIndex((mode) => mode === lastMode);
+  if (lastIndex >= 0) {
+    return SELF_TWEET_SOURCE_MODES[(lastIndex + 1) % SELF_TWEET_SOURCE_MODES.length];
+  }
+  const nowHour = new Date().getUTCHours();
+  return SELF_TWEET_SOURCE_MODES[nowHour % SELF_TWEET_SOURCE_MODES.length];
+}
+
+function buildSelfTweetRawSourceData(
+  sourceMode: SelfTweetSourceMode,
+  sources: {
+    episodes: string;
+    tasks: string;
+    notes: string;
+    wikiTopics: string;
+    articles: string;
+    masterTweets: string;
+  }
+): string {
+  const section = (title: string, body: string, max: number) =>
+    [`## ${title}`, truncateBlock(body, max), ''].join('\n');
+
+  switch (sourceMode) {
+    case 'tech':
+      return [
+        '## 今回の収集方針',
+        'tech: 積み記事、ナレッジ、ノートを優先する。マスター近況や当日エピソードは補助情報として扱う。',
+        '',
+        section('積み記事候補', sources.articles, 2600),
+        section('ナレッジトピック', sources.wikiTopics, 2000),
+        section('最近のノート', sources.notes, 1400),
+        section('マスターの直近ツイート（補助）', sources.masterTweets, 700),
+      ].join('\n');
+    case 'memory':
+      return [
+        '## 今回の収集方針',
+        'memory: 記憶、関係性、過去作業の変化を優先する。単なる当日近況には寄せすぎない。',
+        '',
+        section('当日のエピソード', sources.episodes, 2400),
+        section('ナレッジトピック', sources.wikiTopics, 2000),
+        section('最近のノート', sources.notes, 1200),
+        section('進行中タスク（補助）', sources.tasks, 900),
+      ].join('\n');
+    case 'random':
+      return [
+        '## 今回の収集方針',
+        'random: 特定ソースに縛られない自然発想を優先する。生データは短いきっかけとして使い、既出の強い話題を繰り返さない。',
+        '',
+        section('最近のノート', sources.notes, 1100),
+        section('ナレッジトピック', sources.wikiTopics, 900),
+        section('積み記事候補（短いきっかけ）', sources.articles, 900),
+        section('当日のエピソード（短いきっかけ）', sources.episodes, 800),
+      ].join('\n');
+    case 'daily_life':
+    default:
+      return [
+        '## 今回の収集方針',
+        'daily_life: 日々の出来事を扱う。ただしマスター近況だけに偏らず、ノートやタスクも混ぜる。',
+        '',
+        section('当日のエピソード', sources.episodes, 1800),
+        section('マスターの直近ツイート', sources.masterTweets, 1300),
+        section('進行中タスク', sources.tasks, 1000),
+        section('最近のノート', sources.notes, 900),
+      ].join('\n');
+  }
 }
 
 async function runMechanicalChecks(
@@ -1990,9 +2083,105 @@ async function recordTwitterFeedback(
   });
 }
 
+async function appendPresentedSelfTweetTopics(pending: PendingSelfTweet): Promise<void> {
+  const state = await getTwitterRunStateValue('self_tweet_recent_presented_topics');
+  const previous = normalizePresentedSelfTweetTopics(state?.topics);
+  const now = pending.createdAt || new Date().toISOString();
+  const additions = pending.drafts.map((draft): PresentedSelfTweetTopic => {
+    const candidates = draft.sourceCandidateIds
+      .map((id) => pending.sourceCollection.candidates.find((candidate) => candidate.id === id))
+      .filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate));
+    return {
+      at: now,
+      topic: draft.topic,
+      titles: candidates.map((candidate) => candidate.title).filter(Boolean),
+      sourceTypes: [
+        ...new Set(candidates.map((candidate) => candidate.sourceType).filter(Boolean)),
+      ],
+      angle: draft.angle || undefined,
+      textPreview: truncateInline(draft.text, 120),
+    };
+  });
+  const cutoff = Date.now() - PRESENTED_TOPIC_COOLDOWN_HOURS * 60 * 60 * 1000;
+  const topics = [...additions, ...previous]
+    .filter((topic) => Date.parse(topic.at) >= cutoff)
+    .slice(0, PRESENTED_TOPIC_COOLDOWN_LIMIT);
+  await setTwitterRunState('self_tweet_recent_presented_topics', {
+    at: now,
+    cooldown_hours: PRESENTED_TOPIC_COOLDOWN_HOURS,
+    topics,
+  });
+}
+
+async function getRecentPresentedTopicCooldown(): Promise<string> {
+  const state = await getTwitterRunStateValue('self_tweet_recent_presented_topics');
+  const topics = normalizePresentedSelfTweetTopics(state?.topics);
+  if (!topics.length) return '（なし）';
+  const cutoff = Date.now() - PRESENTED_TOPIC_COOLDOWN_HOURS * 60 * 60 * 1000;
+  const recent = topics.filter((topic) => Date.parse(topic.at) >= cutoff).slice(0, 20);
+  if (!recent.length) return '（なし）';
+  return recent
+    .map((topic, index) => {
+      const labels = [topic.topic, ...topic.titles].filter(Boolean).join(' / ');
+      const sourceTypes = topic.sourceTypes.length ? ` [${topic.sourceTypes.join(', ')}]` : '';
+      return `${index + 1}. ${topic.at}${sourceTypes}: ${truncateInline(labels, 180)}`;
+    })
+    .join('\n');
+}
+
+function normalizePresentedSelfTweetTopics(value: unknown): PresentedSelfTweetTopic[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item): PresentedSelfTweetTopic | null => {
+      if (!item || typeof item !== 'object') return null;
+      const raw = item as Record<string, unknown>;
+      const at = getString(raw.at);
+      const topic = getString(raw.topic);
+      const textPreview = getString(raw.textPreview);
+      if (!at || !topic) return null;
+      return {
+        at,
+        topic,
+        titles: Array.isArray(raw.titles) ? raw.titles.map(String).filter(Boolean) : [],
+        sourceTypes: Array.isArray(raw.sourceTypes)
+          ? raw.sourceTypes.map(String).filter(Boolean)
+          : [],
+        angle: getString(raw.angle) || undefined,
+        textPreview,
+      };
+    })
+    .filter((topic): topic is PresentedSelfTweetTopic => Boolean(topic));
+}
+
+async function getTwitterRunStateValue(keyName: string): Promise<Record<string, unknown> | null> {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) return null;
+  try {
+    const encodedKey = encodeURIComponent(keyName);
+    const res = await fetch(
+      `${url}/rest/v1/twitter_run_state?key=eq.${encodedKey}&select=value&limit=1`,
+      {
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+        },
+      }
+    );
+    if (!res.ok) return null;
+    const rows = (await res.json()) as Array<{ value?: unknown }>;
+    const value = rows[0]?.value;
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 async function getTwitterRunStateContext(): Promise<string> {
   return safeSupabaseGet(
-    'twitter_run_state?select=key,value,updated_at&order=updated_at.desc&limit=8'
+    'twitter_run_state?select=key,value,updated_at&order=updated_at.desc&limit=12'
   );
 }
 
