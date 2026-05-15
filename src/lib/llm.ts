@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { buildNikechanCorePrompt } from './nikechan-core.js';
 
 const WORKDIR = process.env.WORKSPACE_PATH || process.cwd();
 
@@ -265,7 +266,7 @@ function runClaude(prompt: string): Promise<string> {
     });
     proc.on('error', reject);
 
-    proc.stdin.write(prompt);
+    proc.stdin.write(buildNikechanCorePrompt('xangi-world-karakuri', prompt, { warn: true }));
     proc.stdin.end();
   });
 }

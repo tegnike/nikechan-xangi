@@ -4,7 +4,7 @@ import {
   recordEmotionShift,
   getMemoryEntries,
   addMemoryEntry,
-  addKarakuriActivityLog,
+  addKarakuriActivityLog as addKarakuriActivityLogRaw,
   addKarakuriCommitment,
   buildKarakuriMemoryContext,
   formatKarakuriPersonContext,
@@ -18,6 +18,8 @@ import {
   invalidateUserContextCache,
   type KarakuriCommitment,
   type KarakuriCommitmentInput,
+  type KarakuriActivityLogInput,
+  type KarakuriActivityLogRow,
   type KarakuriPersonContext,
   updateKarakuriCommitmentStatus,
   updateKarakuriPlatformDisplayName,
@@ -27,6 +29,10 @@ import {
 } from '../lib/db-helpers.js';
 import { askKarakuriLLM, decideKarakuriNickname, type KarakuriDecision } from '../lib/llm.js';
 import { runKarakuriCommand } from '../lib/karakuri-api.js';
+import { getNikechanCoreAudit } from '../lib/nikechan-core.js';
+import { assertPublicEgressAllowed } from '../lib/public-safety.js';
+import { formatWorkflowReportForDiscord, resolveWorkflowControl } from '../lib/workflow-manager.js';
+import { createWorkflowReport, type WorkflowReportStatus } from '../lib/workflow-report.js';
 
 // エージェント情報: "名前 (id: 16-20桁の数字)" または "名前 (16-20桁の数字)" 形式
 const AGENT_ID_RE = /([^、\s(]+)\s*\((?:id:\s*)?(\d{15,20})\)/g;
@@ -34,6 +40,107 @@ const AGENT_ID_RE = /([^、\s(]+)\s*\((?:id:\s*)?(\d{15,20})\)/g;
 const HAS_CHOICES_RE = /選択肢[：:]/;
 // conversation_id抽出
 const CONVERSATION_ID_RE = /conversation[-_][\w-]+/i;
+
+function addKarakuriActivityLog(
+  input: KarakuriActivityLogInput
+): Promise<KarakuriActivityLogRow | null> {
+  const requestedDryRun = process.env.KARAKURI_WORKFLOW_DRY_RUN === 'true';
+  const control = resolveWorkflowControl('karakuri', requestedDryRun);
+  const coreAudit = getNikechanCoreAudit('xangi-world-karakuri');
+  return addKarakuriActivityLogRaw({
+    ...input,
+    parsed: {
+      nikechan_core: coreAudit,
+      release_mode: control.releaseMode,
+      workflow_report: createWorkflowReport({
+        surface: 'karakuri',
+        workflow: 'karakuri-world',
+        status: karakuriReportStatus(input.message_type, input.parsed),
+        summary: input.raw_content,
+        actions: buildKarakuriReportActions(input.parsed),
+        sourceRefs: input.turn_key ? [`turn:${input.turn_key}`] : [],
+        audit: {
+          releaseMode: control.releaseMode,
+          dryRun: control.dryRun,
+          coreProfile: stringField(coreAudit, 'profileId'),
+          coreStatus: stringField(coreAudit, 'status'),
+        },
+        nextAction: karakuriNextAction(input.parsed),
+        error: stringField(input.parsed, 'error'),
+      }),
+      ...(input.parsed ?? {}),
+    },
+  });
+}
+
+function karakuriReportStatus(
+  messageType: KarakuriActivityLogInput['message_type'],
+  parsed?: Record<string, unknown>
+): WorkflowReportStatus {
+  if (typeof parsed?.error === 'string') return 'failed';
+  if (parsed?.dry_run === true) return 'dry-run';
+  if (parsed?.skipped === true || messageType === 'bot_notification') return 'skipped';
+  if (parsed?.api_success === false) return 'blocked';
+  return 'success';
+}
+
+function buildKarakuriReportActions(parsed?: Record<string, unknown>) {
+  const command = stringField(parsed, 'command');
+  if (!command) return [];
+  const args = stringField(parsed, 'args') ?? '';
+  return [
+    {
+      type: command,
+      label: `${command}${args ? ` ${args}` : ''}`,
+      status: karakuriReportStatus('ai_action', parsed),
+    },
+  ];
+}
+
+function karakuriNextAction(parsed?: Record<string, unknown>): string | undefined {
+  if (typeof parsed?.error === 'string') return 'inspect karakuri workflow failure';
+  if (parsed?.api_success === false) return 'check karakuri API state before retry';
+  return undefined;
+}
+
+function buildKarakuriManagerReport(input: {
+  turnKey: string;
+  decision: KarakuriDecision;
+  status: WorkflowReportStatus;
+  summary: string;
+  releaseMode: string;
+  dryRun: boolean;
+  nextAction?: string;
+  error?: string;
+}) {
+  return createWorkflowReport({
+    surface: 'karakuri',
+    workflow: 'karakuri-world',
+    status: input.status,
+    summary: input.summary,
+    actions: [
+      {
+        type: input.decision.command,
+        label: `${input.decision.command}${input.decision.args ? ` ${input.decision.args}` : ''}`,
+        status: input.status,
+      },
+    ],
+    sourceRefs: [`turn:${input.turnKey}`],
+    audit: {
+      releaseMode: input.releaseMode,
+      dryRun: input.dryRun,
+      coreProfile: 'xangi-world-karakuri',
+    },
+    nextAction: input.nextAction,
+    error: input.error,
+  });
+}
+
+function stringField(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === 'string' ? field : undefined;
+}
 
 const RECORDABLE_COMMANDS = new Set([
   'move',
@@ -148,12 +255,12 @@ export async function runKarakuriWorkflow(
       );
       await updateKarakuriPlatformDisplayName(agentId, agentName).catch(() => {});
       if (needsNicknameInit) {
-        const episodes = await getRecentContactEpisodes(person.userId, 5);
+        const episodes = await getRecentContactEpisodes(person.userId, 5, 'karakuri');
         const nickname = await decideKarakuriNickname({
           name: person.name || agentName,
           displayName: agentName,
           bio: person.bio,
-          relationship: person.relationship,
+          relationship: person.relationshipPublic,
           episodes,
         }).catch((e) => {
           console.error(`[karakuri] nickname generation failed for ${agentId}:`, e);
@@ -259,13 +366,26 @@ export async function runKarakuriWorkflow(
   // ─── Step 4: アクション実行（機械的）────────────────────────────────
   let apiResult = '';
   let apiSuccess = false;
+  const control = resolveWorkflowControl(
+    'karakuri',
+    process.env.KARAKURI_WORKFLOW_DRY_RUN === 'true'
+  );
+  const dryRun = control.dryRun;
   try {
-    apiResult = await runKarakuriCommand(
-      decision.command,
-      decision.args,
-      decision.message,
-      opts.messageId
+    await assertPublicEgressAllowed(
+      'karakuri',
+      [decision.command, decision.args, decision.message].filter(Boolean).join(' ')
     );
+    if (dryRun) {
+      apiResult = `KARAKURI dry-run: ${decision.command} ${decision.args}`.trim();
+    } else {
+      apiResult = await runKarakuriCommand(
+        decision.command,
+        decision.args,
+        decision.message,
+        opts.messageId
+      );
+    }
     console.log(`[karakuri] API result: ${apiResult.slice(0, 100)}`);
     if (apiResult.startsWith('busy:')) {
       await addSkippedActionLog({
@@ -281,7 +401,21 @@ export async function runKarakuriWorkflow(
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error('[karakuri] API call failed:', err);
     const reportText = `⚠️ [からくりワールド] API失敗: ${errMsg.slice(0, 200)}`;
-    const sent = toSentReport(await opts.sendReport(reportText).catch(() => undefined));
+    const managerReport = buildKarakuriManagerReport({
+      turnKey,
+      decision,
+      status: 'failed',
+      summary: 'karakuri API failed',
+      releaseMode: control.releaseMode,
+      dryRun,
+      error: errMsg,
+      nextAction: 'check karakuri API state before retry',
+    });
+    const sent = toSentReport(
+      await opts
+        .sendReport(formatWorkflowReportForDiscord(managerReport, reportText))
+        .catch(() => undefined)
+    );
     await addKarakuriActivityLog({
       discord_message_id: sent?.messageId,
       channel_id: sent?.channelId ?? opts.channelId,
@@ -305,6 +439,42 @@ export async function runKarakuriWorkflow(
 
   // API失敗時は後処理をスキップ
   if (!apiSuccess) return;
+
+  if (dryRun) {
+    const reportText = `🧪 [からくりワールド] dry-run: ${buildReportText(decision.command, decision.args, decision.message)}`;
+    const managerReport = buildKarakuriManagerReport({
+      turnKey,
+      decision,
+      status: 'dry-run',
+      summary: `planned ${decision.command} ${decision.args}`.trim(),
+      releaseMode: control.releaseMode,
+      dryRun,
+    });
+    const sent = toSentReport(
+      await opts.sendReport(formatWorkflowReportForDiscord(managerReport, reportText))
+    );
+    await addKarakuriActivityLog({
+      discord_message_id: sent?.messageId,
+      channel_id: sent?.channelId ?? opts.channelId,
+      author_id: sent?.authorId,
+      author_name: sent?.authorName ?? 'AIニケちゃん',
+      message_created_at: sent?.createdAt,
+      message_type: 'ai_action',
+      turn_key: turnKey,
+      raw_content: reportText,
+      parsed: {
+        request_message_id: opts.messageId,
+        command: decision.command,
+        args: decision.args,
+        message: decision.message ?? null,
+        thought: decision.thought,
+        dry_run: true,
+        api_success: false,
+        api_result: apiResult,
+      },
+    }).catch((e) => console.error('[karakuri] activity log dry-run insert failed:', e));
+    return;
+  }
 
   // ─── Step 5: 後処理（機械的）────────────────────────────────────────
 
@@ -354,7 +524,17 @@ export async function runKarakuriWorkflow(
 
   // Discordレポート（アクションした場合のみ）
   const reportText = buildReportText(decision.command, decision.args, decision.message);
-  const sent = toSentReport(await opts.sendReport(reportText));
+  const managerReport = buildKarakuriManagerReport({
+    turnKey,
+    decision,
+    status: 'success',
+    summary: `executed ${decision.command} ${decision.args}`.trim(),
+    releaseMode: control.releaseMode,
+    dryRun,
+  });
+  const sent = toSentReport(
+    await opts.sendReport(formatWorkflowReportForDiscord(managerReport, reportText))
+  );
   await addKarakuriActivityLog({
     discord_message_id: sent?.messageId,
     channel_id: sent?.channelId ?? opts.channelId,

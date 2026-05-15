@@ -1,6 +1,11 @@
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import {
+  formatNikechanCoreContext,
+  loadNikechanCoreContext,
+  type NikechanCoreProfileId,
+} from './lib/nikechan-core.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -76,12 +81,18 @@ export function loadXangiCommands(): string {
  * 完全なシステムプロンプトを生成（resume型ランナー用）
  */
 export function buildSystemPrompt(_workdir?: string): string {
-  return CHAT_SYSTEM_PROMPT_RESUME + loadXangiCommands();
+  return appendCoreContext(CHAT_SYSTEM_PROMPT_RESUME + loadXangiCommands(), 'xangi-assistant');
 }
 
 /**
  * 完全なシステムプロンプトを生成（常駐プロセス用）
  */
 export function buildPersistentSystemPrompt(_workdir?: string): string {
-  return CHAT_SYSTEM_PROMPT_PERSISTENT + loadXangiCommands();
+  return appendCoreContext(CHAT_SYSTEM_PROMPT_PERSISTENT + loadXangiCommands(), 'xangi-assistant');
+}
+
+export function appendCoreContext(prompt: string, profileId: NikechanCoreProfileId): string {
+  const context = loadNikechanCoreContext(profileId, { warn: true });
+  if (!context) return prompt;
+  return `${prompt}\n\n${formatNikechanCoreContext(context)}`;
 }

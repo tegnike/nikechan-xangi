@@ -30,7 +30,7 @@ import { existsSync, readFileSync } from 'fs';
 import { initErrorNotify, notifyError } from './error-notify.js';
 
 // Extracted modules
-import { splitMessage, annotateChannelMentions } from './message-utils.js';
+import { splitMessage, chunkDiscordMessage, annotateChannelMentions } from './message-utils.js';
 import {
   fetchDiscordLinkContent,
   fetchReplyContent,
@@ -63,6 +63,7 @@ import {
   handleScheduleMessage,
   executeScheduleFromResponse,
 } from './schedule-handler.js';
+import { buildNikechanCorePrompt } from './lib/nikechan-core.js';
 
 function isElythWorkflowPrompt(prompt: string): boolean {
   return /^\/elyth-activity(?:\s|（|\(|$)/.test(prompt.trim());
@@ -81,18 +82,23 @@ function buildDiscordReportSender(
 }> {
   return async (text: string) => {
     if (!message.channel || !('send' in message.channel)) return {};
-    const sent = (await (message.channel as { send: (c: string) => Promise<Message> }).send(
-      text
-    )) as Message;
+    const chunks = chunkDiscordMessage(text, DISCORD_SAFE_LENGTH);
+    let firstSent: Message | undefined;
+    const primaryChannel = message.channel as { send: (c: string) => Promise<Message> };
+    for (const chunk of chunks) {
+      const sent = await primaryChannel.send(chunk);
+      firstSent ??= sent;
+    }
     if (reportChannelId) {
       const ch = await client.channels.fetch(reportChannelId).catch(() => null);
       if (ch && 'send' in ch) {
-        await (ch as { send: (c: string) => Promise<unknown> }).send(text);
+        const reportChannel = ch as { send: (c: string) => Promise<unknown> };
+        for (const chunk of chunks) {
+          await reportChannel.send(chunk);
+        }
       }
     }
-    return {
-      ...sentMessageReport(sent),
-    };
+    return firstSent ? sentMessageReport(firstSent) : {};
   };
 }
 
@@ -174,8 +180,14 @@ function buildChannelWorkflowReportSender(
 ): (text: string) => Promise<WorkflowSentReport> {
   return async (text: string) => {
     onText?.(text);
-    const sent = await channel.send(text);
-    return sentMessageReport(sent);
+    const chunks = chunkDiscordMessage(text, DISCORD_SAFE_LENGTH);
+    let firstSent: Message | undefined;
+    for (const chunk of chunks) {
+      const sent = await channel.send(chunk);
+      firstSent ??= sent;
+    }
+    if (!firstSent) firstSent = await channel.send('✅');
+    return sentMessageReport(firstSent);
   };
 }
 
@@ -1042,7 +1054,11 @@ async function main() {
         const channelContext = threadId
           ? `[実行チャンネル: <#${channelId}> / スレッド: <#${threadId}> — !discord send は <#${channelId}> 宛てに書くこと（スレッドへ自動リダイレクトされます）]`
           : `[実行チャンネル: <#${channelId}> — !discord send は <#${channelId}> 宛てに書くこと]`;
-        const contextualPrompt = `${channelContext}\n${remainingPrompt}`;
+        const contextualPrompt = buildNikechanCorePrompt(
+          'xangi-ops',
+          `${channelContext}\n${remainingPrompt}`,
+          { warn: true }
+        );
 
         // チャンネルポリシーから deniedTools を取得し、必要ならワンショットランナーを使用
         const scheduleDeniedTools = channelPolicies[channelId]?.deniedTools ?? [];

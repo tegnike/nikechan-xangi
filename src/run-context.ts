@@ -15,10 +15,12 @@ export function resolveDataDir(workdir?: string): string {
 }
 
 export function buildAgentExtraEnv(options: AgentExtraEnvOptions): Record<string, string> {
+  const coreProfile = options.entrypoint === 'scheduler' ? 'xangi-ops' : 'xangi-assistant';
   const conversationId = options.conversationId || options.channelId;
   const env: Record<string, string> = {
     XANGI_DATA_DIR: resolveDataDir(options.workdir),
     XANGI_ENTRYPOINT: options.entrypoint,
+    XANGI_CORE_PROFILE: coreProfile,
     XANGI_PLATFORM: options.platform,
     XANGI_CHANNEL_ID: options.channelId,
     XANGI_CONVERSATION_KEY: `${options.platform}:${conversationId}`,

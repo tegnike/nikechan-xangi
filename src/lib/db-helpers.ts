@@ -668,6 +668,7 @@ export interface KarakuriPersonContext {
   memo?: string | null;
   context?: string | null;
   relationship?: string | null;
+  relationshipPublic?: string | null;
 }
 
 export interface ElythPersonContext {
@@ -680,6 +681,7 @@ export interface ElythPersonContext {
   memo?: string | null;
   context?: string | null;
   relationship?: string | null;
+  relationshipPublic?: string | null;
   isFollowed?: boolean | null;
   recentEpisodes?: string;
   profileContext?: string;
@@ -699,17 +701,19 @@ export async function ensureKarakuriUser(
   const id = data.id as string;
   const needsMemoInit = !data.memo;
   const needsNicknameInit = !data.nickname;
+  const publicData = await getPublicUserProjection('karakuri', agentId, 'karakuri');
   return {
     person: {
       userId: id,
       agentId,
       displayName: agentName,
-      name: typeof data.name === 'string' ? data.name : null,
-      nickname: typeof data.nickname === 'string' ? data.nickname : null,
-      bio: typeof data.bio === 'string' ? data.bio : null,
-      memo: typeof data.memo === 'string' ? data.memo : null,
-      context: typeof data.context === 'string' ? data.context : null,
-      relationship: typeof data.relationship === 'string' ? data.relationship : null,
+      name: readString(publicData?.name) ?? readString(data.name),
+      nickname: readString(publicData?.nickname) ?? readString(data.nickname),
+      bio: readString(publicData?.bio) ?? readString(data.bio),
+      memo: null,
+      context: null,
+      relationship: null,
+      relationshipPublic: readString(publicData?.relationship_public),
     },
     needsMemoInit,
     needsNicknameInit,
@@ -729,7 +733,10 @@ export async function ensureElythUser(
     throw new Error(`user-ensure elyth returned non-JSON: ${raw.slice(0, 100)}`);
   }
   const id = data.id as string;
-  const person = userJsonToElythPerson(data, cleanHandle, displayName);
+  const publicData = await getPublicUserProjection('elyth', cleanHandle, 'elyth');
+  const person = userJsonToElythPerson(publicData ?? data, cleanHandle, displayName, {
+    publicOnly: !!publicData,
+  });
   return {
     person: { ...person, userId: id },
     needsMemoInit: !data.memo,
@@ -748,7 +755,10 @@ export async function getElythPersonByHandle(handle: string): Promise<ElythPerso
     return null;
   }
   if (!data.id) return null;
-  return userJsonToElythPerson(data, cleanHandle, cleanHandle);
+  const publicData = await getPublicUserProjection('elyth', cleanHandle, 'elyth');
+  return userJsonToElythPerson(publicData ?? data, cleanHandle, cleanHandle, {
+    publicOnly: !!publicData,
+  });
 }
 
 export async function getElythPeopleList(): Promise<ElythPersonContext[]> {
@@ -774,9 +784,10 @@ export async function getElythPeopleList(): Promise<ElythPersonContext[]> {
       name: typeof users.name === 'string' ? users.name : null,
       nickname: typeof users.nickname === 'string' ? users.nickname : null,
       bio: typeof users.bio === 'string' ? users.bio : null,
-      memo: typeof users.memo === 'string' ? users.memo : null,
-      context: typeof users.context === 'string' ? users.context : null,
-      relationship: typeof users.relationship === 'string' ? users.relationship : null,
+      memo: null,
+      context: null,
+      relationship: null,
+      relationshipPublic: publicRelationship(readString(users.relationship)),
       isFollowed: typeof record.is_followed === 'boolean' ? record.is_followed : null,
     };
   });
@@ -869,8 +880,15 @@ export async function updateUserNickname(userId: string, nickname: string): Prom
   await runDbSh(['user-update', userId, 'nickname', nickname]);
 }
 
-export async function getRecentContactEpisodes(userId: string, limit = 5): Promise<string> {
-  return runDbSh(['ce-list', userId, String(limit)]).catch(() => '');
+export async function getRecentContactEpisodes(
+  userId: string,
+  limit = 5,
+  surface?: string
+): Promise<string> {
+  const args = surface
+    ? ['ce-list-public', userId, surface, String(limit)]
+    : ['ce-list', userId, String(limit)];
+  return runDbSh(args).catch(() => '');
 }
 
 interface KarakuriPlatformAccountRow {
@@ -917,9 +935,10 @@ export async function getKarakuriPersonByDisplayName(
     name: user.name ?? null,
     nickname: user.nickname ?? null,
     bio: user.bio ?? null,
-    memo: user.memo ?? null,
-    context: user.context ?? null,
-    relationship: user.relationship ?? null,
+    memo: null,
+    context: null,
+    relationship: null,
+    relationshipPublic: publicRelationship(user.relationship ?? null),
   };
 }
 
@@ -943,9 +962,7 @@ export function formatKarakuriPersonContext(people: KarakuriPersonContext[]): st
         `agent_id=${person.agentId}`,
         `表示名=${person.displayName}`,
         `必ず使う呼称=${canonicalName}`,
-        person.relationship ? `relationship=${person.relationship}` : '',
-        person.memo ? `memo=${person.memo}` : '',
-        person.context ? `context=${person.context}` : '',
+        person.relationshipPublic ? `relationship_public=${person.relationshipPublic}` : '',
       ].filter(Boolean);
       return `- ${details.join(' / ')}`;
     })
@@ -962,10 +979,8 @@ export function formatElythPersonContext(people: ElythPersonContext[]): string {
         `表示名=${person.displayName}`,
         `呼称=${canonicalName}`,
         person.isFollowed === true ? 'followed=true' : '',
-        person.relationship ? `relationship=${person.relationship}` : '',
+        person.relationshipPublic ? `relationship_public=${person.relationshipPublic}` : '',
         person.bio ? `bio=${person.bio}` : '',
-        person.memo ? `memo=${person.memo}` : '',
-        person.context ? `context=${person.context}` : '',
         person.recentEpisodes ? `recent=${person.recentEpisodes.slice(0, 240)}` : '',
         person.profileContext ? `profile=${person.profileContext.slice(0, 260)}` : '',
       ].filter(Boolean);
@@ -978,20 +993,46 @@ function normalizeElythHandle(handle: string): string {
   return handle.trim().replace(/^@/, '');
 }
 
+async function getPublicUserProjection(
+  platform: string,
+  username: string,
+  surface: string
+): Promise<Record<string, unknown> | null> {
+  const raw = await runDbSh(['user-get-public', platform, username, surface]).catch(() => 'null');
+  if (!raw || raw === 'null') return null;
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 function userJsonToElythPerson(
   data: Record<string, unknown>,
   handle: string,
-  displayName: string
+  displayName: string,
+  options?: { publicOnly?: boolean }
 ): ElythPersonContext {
   return {
     userId: String(data.id ?? ''),
     handle,
     displayName,
-    name: typeof data.name === 'string' ? data.name : null,
-    nickname: typeof data.nickname === 'string' ? data.nickname : null,
-    bio: typeof data.bio === 'string' ? data.bio : null,
-    memo: typeof data.memo === 'string' ? data.memo : null,
-    context: typeof data.context === 'string' ? data.context : null,
-    relationship: typeof data.relationship === 'string' ? data.relationship : null,
+    name: readString(data.name),
+    nickname: readString(data.nickname),
+    bio: readString(data.bio),
+    memo: options?.publicOnly ? null : readString(data.memo),
+    context: options?.publicOnly ? null : readString(data.context),
+    relationship: options?.publicOnly ? null : readString(data.relationship),
+    relationshipPublic:
+      readString(data.relationship_public) ?? publicRelationship(readString(data.relationship)),
   };
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function publicRelationship(value: string | null): string | null {
+  if (!value) return null;
+  return /family|close|friend|partner|親|友|家族/i.test(value) ? 'known_close' : 'known';
 }

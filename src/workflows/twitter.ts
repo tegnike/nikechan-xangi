@@ -2,6 +2,10 @@ import { spawn } from 'child_process';
 import { mkdir, readFile, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 import { formatEmotion, getEmotion, recordEmotionShift, runDbSh } from '../lib/db-helpers.js';
+import { getNikechanCoreAudit } from '../lib/nikechan-core.js';
+import { assertPublicEgressAllowed, assertPublicOutputAllowed } from '../lib/public-safety.js';
+import { formatWorkflowReportForDiscord, resolveWorkflowControl } from '../lib/workflow-manager.js';
+import { createWorkflowReport, type WorkflowReportStatus } from '../lib/workflow-report.js';
 import {
   collectSelfTweetSourcesWithAI,
   decideMentionNickname,
@@ -358,9 +362,23 @@ export async function handleSelfTweetApproval(
     if (completion?.sessionId) {
       await bindWorkflowSession(opts, completion.sessionId, 'self-tweet:completion');
     }
-    await opts.sendReport(
+    const detail =
       completion?.message ||
-        `${isTwitterWorkflowDryRun() ? '投稿予定を確認しました。' : '投稿まで完了しました。'}\n${postResult || '（投稿結果のURL取得なし）'}`
+      `${isTwitterWorkflowDryRun() ? '投稿予定を確認しました。' : '投稿まで完了しました。'}\n${postResult || '（投稿結果のURL取得なし）'}`;
+    await opts.sendReport(
+      formatWorkflowReportForDiscord(
+        buildTwitterManagerReport({
+          workflow: 'self-tweet',
+          status: isTwitterWorkflowDryRun() ? 'dry-run' : 'success',
+          summary: isTwitterWorkflowDryRun() ? 'self tweet planned' : 'self tweet posted',
+          runKey,
+          actions: [{ type: 'tweet', label: `tweet ${draft.id}` }],
+          nextAction: isTwitterWorkflowDryRun()
+            ? 'review dry-run result before live posting'
+            : undefined,
+        }),
+        detail
+      )
     );
     return true;
   }
@@ -647,8 +665,30 @@ export async function handleMentionReactionApproval(
     const urls = result.results
       .flatMap((entry) => [entry.reply_url, entry.quote_url].filter(Boolean))
       .join('\n');
+    const detail =
+      completion?.message || `処理しました。\n${result.summary}${urls ? `\n\n${urls}` : ''}`;
     await opts.sendReport(
-      completion?.message || `処理しました。\n${result.summary}${urls ? `\n\n${urls}` : ''}`
+      formatWorkflowReportForDiscord(
+        buildTwitterManagerReport({
+          workflow: 'mention-reaction',
+          status: mentionResultStatus(result.results),
+          summary: result.summary,
+          runKey,
+          actions: result.results.map((entry) => ({
+            type: entry.action,
+            label: `${entry.item_id} ${entry.action}`,
+            status: entry.error ? 'failed' : isTwitterWorkflowDryRun() ? 'dry-run' : 'success',
+          })),
+          nextAction: result.results.some((entry) => entry.error)
+            ? 'inspect failed mention action(s)'
+            : undefined,
+          error: result.results
+            .map((entry) => entry.error)
+            .filter(Boolean)
+            .join(' / '),
+        }),
+        detail
+      )
     );
     return true;
   }
@@ -935,9 +975,7 @@ interface UserProfileRecord {
   nickname?: string | null;
   bio?: string | null;
   relationship?: string | null;
-  memo?: string | null;
-  context?: string | null;
-  traits?: string[] | null;
+  relationship_public?: string | null;
 }
 
 async function collectTweetAuthorContext(log: TweetLogRecord): Promise<TweetAuthorContext> {
@@ -947,8 +985,10 @@ async function collectTweetAuthorContext(log: TweetLogRecord): Promise<TweetAuth
   );
   const userId = typeof ensured?.id === 'string' ? ensured.id : '';
   const [profileRaw, episodes, thirdParties] = await Promise.all([
-    userId ? safeDb(['user-get', userId]) : Promise.resolve(JSON.stringify(ensured ?? {})),
-    userId ? safeDb(['ce-list', userId, '5']) : Promise.resolve('[]'),
+    userId
+      ? safeDb(['user-get-public', 'twitter', username, 'x'])
+      : Promise.resolve(JSON.stringify(ensured ?? {})),
+    userId ? safeDb(['ce-list-public', userId, 'x', '5']) : Promise.resolve('[]'),
     collectThirdPartyContext(log.body || ''),
   ]);
   const profile = parseUserProfile(profileRaw);
@@ -961,7 +1001,7 @@ async function collectTweetAuthorContext(log: TweetLogRecord): Promise<TweetAuth
       displayName: log.name || authorName,
       username,
       bio: profile.bio,
-      relationship: profile.relationship,
+      relationship: profile.relationship_public,
       episodes,
     }).catch((err) => {
       console.error(`[twitter] mention nickname generation failed for @${username}:`, err);
@@ -1006,7 +1046,8 @@ async function collectThirdPartyContext(text: string): Promise<string> {
   if (!terms.length) return '';
   const results = await Promise.all(
     terms.map(
-      async (term) => `### ${term}\n${truncateBlock(await safeDb(['user-search', term]), 700)}`
+      async (term) =>
+        `### ${term}\n${truncateBlock(await safeDb(['user-search-public', term, 'x']), 700)}`
     )
   );
   return results.join('\n\n');
@@ -1274,6 +1315,10 @@ async function executeMentionReactions(
         if (isTwitterWorkflowDryRun()) {
           result.reply_url = `dry-run reply: ${item.replyText}`;
         } else {
+          await assertPublicEgressAllowed(
+            'x',
+            item.replyMechanicalCheck?.checkedText || item.replyText
+          );
           result.reply_url = await runTwitterPost([
             'reply',
             item.replyMechanicalCheck?.checkedText || item.replyText,
@@ -1288,6 +1333,10 @@ async function executeMentionReactions(
         if (isTwitterWorkflowDryRun()) {
           result.quote_url = `dry-run quote: ${item.quoteText}`;
         } else {
+          await assertPublicEgressAllowed(
+            'x',
+            item.quoteMechanicalCheck?.checkedText || item.quoteText
+          );
           result.quote_url = await runTwitterPost([
             'quote',
             item.quoteMechanicalCheck?.checkedText || item.quoteText,
@@ -1359,6 +1408,15 @@ async function recordMentionContactEpisode(
   await runDbSh(['user-touch', ensured.id]);
 }
 
+function mentionResultStatus(
+  results: Array<{ action: string; reply_url?: string; quote_url?: string; error?: string }>
+): WorkflowReportStatus {
+  if (isTwitterWorkflowDryRun()) return 'dry-run';
+  if (results.some((entry) => entry.error)) return 'partial';
+  if (results.every((entry) => entry.action === 'skip')) return 'skipped';
+  return 'success';
+}
+
 async function executeHashtagReactions(
   items: HashtagReactionItem[],
   candidates: HashtagReactionCandidate[],
@@ -1394,6 +1452,7 @@ async function executeHashtagReactions(
         if (isTwitterWorkflowDryRun()) {
           result.url = `dry-run retweet: ${item.postId}`;
         } else {
+          await assertPublicOutputAllowed('x');
           result.url = await runTwitterPost(['retweet', item.postId, 'hashtag-reaction']);
         }
         retweetCount += 1;
@@ -1447,8 +1506,41 @@ async function executeHashtagReactions(
     await recordTwitterLocalEpisode(`hashtag-reactionを実行。${summary}`);
   }
   await opts.setPhase?.('text');
-  await opts.sendReport(formatHashtagReport(items, results));
+  await opts.sendReport(
+    formatWorkflowReportForDiscord(
+      buildTwitterManagerReport({
+        workflow: 'hashtag-reaction',
+        status: hashtagResultStatus(results),
+        summary,
+        runKey: opts.messageId
+          ? `twitter:hashtag-reaction:${opts.messageId}`
+          : 'twitter:hashtag-reaction',
+        actions: results.map((entry) => ({
+          type: entry.action,
+          label: `${entry.item_id} ${entry.action}`,
+          status: entry.error ? 'failed' : isTwitterWorkflowDryRun() ? 'dry-run' : 'success',
+        })),
+        nextAction: results.some((entry) => entry.error)
+          ? 'inspect failed hashtag action(s)'
+          : undefined,
+        error: results
+          .map((entry) => entry.error)
+          .filter(Boolean)
+          .join(' / '),
+      }),
+      formatHashtagReport(items, results)
+    )
+  );
   return { summary, results };
+}
+
+function hashtagResultStatus(
+  results: Array<{ item_id: string; action: string; url?: string; error?: string; reason: string }>
+): WorkflowReportStatus {
+  if (isTwitterWorkflowDryRun()) return 'dry-run';
+  if (results.some((entry) => entry.error)) return 'partial';
+  if (results.every((entry) => entry.action !== 'retweet')) return 'skipped';
+  return 'success';
 }
 
 function formatHashtagReport(
@@ -1485,6 +1577,7 @@ function formatHashtagReport(
 }
 
 async function markTweetLogsChecked(ids: string[]): Promise<void> {
+  if (!shouldPersistTwitterWorkflow()) return;
   const unique = [...new Set(ids.filter(Boolean))];
   if (!unique.length) return;
   await runDbSh(['tweet-log-check', unique.join(',')]);
@@ -1681,7 +1774,6 @@ async function collectRawSelfTweetSources(): Promise<{
   runStateContext: string;
   rawSourceData: string;
 }> {
-  const today = new Date().toISOString().slice(0, 10);
   const [lastSourceModeState, presentedTopicCooldown] = await Promise.all([
     getTwitterRunStateValue('self_tweet_last_source_mode'),
     getRecentPresentedTopicCooldown(),
@@ -1701,10 +1793,10 @@ async function collectRawSelfTweetSources(): Promise<{
   ] = await Promise.all([
     safeDb(['topics-get']),
     safeRecentTweets(),
-    safeDb(['ep-list', today]),
-    safeDb(['task-list', 'in_progress']),
-    safeDb(['note-list']),
-    safeDb(['wiki-list', 'active']),
+    safeDb(['public-episodes', 'x', '30']),
+    Promise.resolve('公開系workflowではraw taskを利用しない'),
+    safeDb(['public-notes', 'x', '10']),
+    safeDb(['public-wiki', 'x', '10']),
     safeDb(['reading-unpushed-twitter']),
     safeSupabaseGet(
       'my_tweets?order=created_at.desc&limit=8&select=text,quoted_text,url,created_at'
@@ -1850,6 +1942,7 @@ async function publishSelectedSelfTweet(
   if (isTwitterWorkflowDryRun()) {
     return `TWITTER_WORKFLOW_DRY_RUN=true のため投稿は実行しません。\n\n予定本文:\n「${text}」`;
   }
+  await assertPublicEgressAllowed('x', text);
   const skillRunEnv = await ensureSelfTweetSkillRunForPosting(opts.channelId);
   const result = await runTwitterPost(['tweet', text, 'self-tweet'], skillRunEnv);
   await completeSelfTweetSkillRunAfterPosting(skillRunEnv);
@@ -1863,7 +1956,7 @@ async function publishSelectedSelfTweet(
 }
 
 function isTwitterWorkflowDryRun(): boolean {
-  return process.env.TWITTER_WORKFLOW_DRY_RUN === 'true';
+  return resolveWorkflowControl('x', process.env.TWITTER_WORKFLOW_DRY_RUN === 'true').dryRun;
 }
 
 function shouldPersistTwitterWorkflow(): boolean {
@@ -2056,6 +2149,9 @@ async function addTwitterActivityLog(input: TwitterActivityLogInput): Promise<vo
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) return;
+  const requestedDryRun = process.env.TWITTER_WORKFLOW_DRY_RUN === 'true';
+  const control = resolveWorkflowControl('x', requestedDryRun);
+  const coreAudit = getNikechanCoreAudit('xangi-social');
   try {
     const res = await fetch(`${url}/rest/v1/twitter_activity_logs`, {
       method: 'POST',
@@ -2067,7 +2163,28 @@ async function addTwitterActivityLog(input: TwitterActivityLogInput): Promise<vo
       },
       body: JSON.stringify({
         ...input,
-        parsed: input.parsed ?? {},
+        parsed: {
+          nikechan_core: coreAudit,
+          release_mode: control.releaseMode,
+          workflow_report: createWorkflowReport({
+            surface: 'x',
+            workflow: input.workflow,
+            status: twitterReportStatus(input.stage, input.parsed),
+            summary: input.raw_content,
+            sourceRefs: [input.run_key ? `run:${input.run_key}` : null].filter(
+              (ref): ref is string => Boolean(ref)
+            ),
+            audit: {
+              releaseMode: control.releaseMode,
+              dryRun: control.dryRun,
+              coreProfile: stringField(coreAudit, 'profileId'),
+              coreStatus: stringField(coreAudit, 'status'),
+            },
+            nextAction: twitterNextAction(input.stage),
+            error: input.stage === 'error' ? stringField(input.parsed, 'error') : undefined,
+          }),
+          ...(input.parsed ?? {}),
+        },
         created_by: 'xangi',
       }),
     });
@@ -2077,6 +2194,66 @@ async function addTwitterActivityLog(input: TwitterActivityLogInput): Promise<vo
   } catch (err) {
     console.error('[twitter] activity log insert failed:', err);
   }
+}
+
+function buildTwitterManagerReport(input: {
+  workflow: TwitterActivityLogInput['workflow'];
+  status: WorkflowReportStatus;
+  summary: string;
+  runKey: string;
+  actions?: Array<{ type: string; label: string; status?: WorkflowReportStatus }>;
+  nextAction?: string;
+  error?: string;
+}) {
+  const control = resolveWorkflowControl('x', process.env.TWITTER_WORKFLOW_DRY_RUN === 'true');
+  return createWorkflowReport({
+    surface: 'x',
+    workflow: input.workflow,
+    status: input.status,
+    summary: input.summary,
+    actions: input.actions ?? [],
+    sourceRefs: [`run:${input.runKey}`],
+    audit: {
+      releaseMode: control.releaseMode,
+      dryRun: control.dryRun,
+      coreProfile: 'xangi-social',
+    },
+    nextAction: input.nextAction,
+    error: input.error || undefined,
+  });
+}
+
+function twitterReportStatus(
+  stage: TwitterActivityLogInput['stage'],
+  parsed?: Record<string, unknown>
+): WorkflowReportStatus {
+  if (stage === 'error') return 'failed';
+  if (stage === 'cancel') return 'skipped';
+  if (stage === 'present') return 'blocked';
+  if (stage === 'execute' && hasTwitterExecutionErrors(parsed)) return 'partial';
+  return 'success';
+}
+
+function hasTwitterExecutionErrors(parsed?: Record<string, unknown>): boolean {
+  const results = parsed?.results;
+  if (!Array.isArray(results)) return false;
+  return results.some((result) => {
+    if (!result || typeof result !== 'object') return false;
+    const value = result as Record<string, unknown>;
+    return typeof value.error === 'string' || value.ok === false;
+  });
+}
+
+function twitterNextAction(stage: TwitterActivityLogInput['stage']): string | undefined {
+  if (stage === 'present') return 'wait for master approval';
+  if (stage === 'error') return 'inspect twitter workflow failure';
+  return undefined;
+}
+
+function stringField(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === 'string' ? field : undefined;
 }
 
 async function recordTwitterFeedback(
@@ -2231,7 +2408,7 @@ async function collectPersonContext(sourceCollection: SelfTweetSourceCollection)
   if (!terms.length) return '（なし）';
   const results = await Promise.all(
     terms.slice(0, 8).map(async (term) => {
-      const result = await safeDb(['user-search', term]);
+      const result = await safeDb(['user-search-public', term, 'x']);
       return `## ${term}\n${truncateBlock(result, 900)}`;
     })
   );
@@ -2333,10 +2510,8 @@ function normalizeUserProfile(raw: Record<string, unknown>): UserProfileRecord {
     name: getString(raw.name) || null,
     nickname: getString(raw.nickname) || null,
     bio: getString(raw.bio) || null,
-    relationship: getString(raw.relationship) || null,
-    memo: getString(raw.memo) || null,
-    context: getString(raw.context) || null,
-    traits: Array.isArray(raw.traits) ? raw.traits.map(String).filter(Boolean) : null,
+    relationship: null,
+    relationship_public: getString(raw.relationship_public) || null,
   };
 }
 

@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { buildNikechanCorePrompt } from './nikechan-core.js';
 
 const WORKDIR = process.env.WORKSPACE_PATH || process.cwd();
 
@@ -1510,7 +1511,7 @@ function runClaudeWithArgs(
   return new Promise((resolve, reject) => {
     const args = ['-p', ...modelArgs, '--output-format', 'json'];
     if (sessionId) args.push('--resume', sessionId);
-    args.push(prompt);
+    args.push(buildNikechanCorePrompt('xangi-social', prompt, { warn: true }));
     const proc = spawn('claude', args, {
       env: process.env,
       cwd: '/tmp',

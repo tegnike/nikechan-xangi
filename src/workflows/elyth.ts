@@ -1,5 +1,5 @@
 import {
-  addElythActivityLog,
+  addElythActivityLog as addElythActivityLogRaw,
   addElythContactEpisode,
   addElythPostLog,
   ensureElythUser,
@@ -13,6 +13,8 @@ import {
   setElythFollowed,
   touchUser,
   updateUserBio,
+  type ElythActivityLogInput,
+  type ElythActivityLogRow,
   type ElythPersonContext,
   type ElythPostLogRow,
 } from '../lib/db-helpers.js';
@@ -27,6 +29,10 @@ import {
   type ElythPostCandidate,
   type ElythValidatedPlan,
 } from '../lib/elyth-guards.js';
+import { getNikechanCoreAudit } from '../lib/nikechan-core.js';
+import { assertPublicEgressAllowed, assertPublicOutputAllowed } from '../lib/public-safety.js';
+import { formatWorkflowReportForDiscord, resolveWorkflowControl } from '../lib/workflow-manager.js';
+import { createWorkflowReport, type WorkflowReportStatus } from '../lib/workflow-report.js';
 
 export interface ElythSentReport {
   messageId?: string;
@@ -34,6 +40,58 @@ export interface ElythSentReport {
   authorId?: string;
   authorName?: string;
   createdAt?: string;
+}
+
+function addElythActivityLog(input: ElythActivityLogInput): Promise<ElythActivityLogRow | null> {
+  const requestedDryRun = process.env.ELYTH_WORKFLOW_DRY_RUN === 'true';
+  const control = resolveWorkflowControl('elyth', requestedDryRun);
+  const coreAudit = getNikechanCoreAudit('xangi-world-elyth');
+  return addElythActivityLogRaw({
+    ...input,
+    parsed: {
+      nikechan_core: coreAudit,
+      release_mode: control.releaseMode,
+      workflow_report: createWorkflowReport({
+        surface: 'elyth',
+        workflow: 'elyth-activity',
+        status: elythReportStatus(input.stage, input.parsed),
+        summary: input.raw_content,
+        sourceRefs: input.run_key ? [`run:${input.run_key}`] : [],
+        audit: {
+          releaseMode: control.releaseMode,
+          dryRun: control.dryRun,
+          coreProfile: stringField(coreAudit, 'profileId'),
+          coreStatus: stringField(coreAudit, 'status'),
+        },
+        nextAction: input.stage === 'error' ? 'inspect ELYTH workflow failure' : undefined,
+        error: input.stage === 'error' ? stringField(input.parsed, 'error') : undefined,
+      }),
+      ...(input.parsed ?? {}),
+    },
+  });
+}
+
+function elythReportStatus(
+  stage: ElythActivityLogInput['stage'],
+  parsed?: Record<string, unknown>
+): WorkflowReportStatus {
+  if (stage === 'error') return 'failed';
+  if (stage === 'dry_run') return 'dry-run';
+  if (stage === 'execute' && hasExecutionErrors(parsed)) return 'partial';
+  return 'success';
+}
+
+function hasExecutionErrors(parsed?: Record<string, unknown>): boolean {
+  const execution = parsed?.execution;
+  if (!execution || typeof execution !== 'object') return false;
+  const errors = (execution as { errors?: unknown }).errors;
+  return Array.isArray(errors) && errors.length > 0;
+}
+
+function stringField(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === 'string' ? field : undefined;
 }
 
 export interface ElythWorkflowOptions {
@@ -49,7 +107,8 @@ export interface ElythWorkflowOptions {
 
 export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void> {
   const requestedDryRun = opts.dryRun ?? process.env.ELYTH_WORKFLOW_DRY_RUN === 'true';
-  const dryRun = requestedDryRun;
+  const control = resolveWorkflowControl('elyth', requestedDryRun);
+  const dryRun = control.dryRun;
   const executionBlocked = false;
   const runKey = opts.messageId ? `elyth:${opts.messageId}` : `elyth:${Date.now()}`;
   const mcp = new ElythMcpClient();
@@ -202,7 +261,15 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
       executionBlocked,
       execution,
     });
-    await opts.sendReport(report);
+    const managerReport = buildElythManagerReport({
+      runKey,
+      dryRun,
+      executionBlocked,
+      execution,
+      validated,
+      releaseMode: control.releaseMode,
+    });
+    await opts.sendReport(formatWorkflowReportForDiscord(managerReport, report));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[elyth] workflow failed:', err);
@@ -217,7 +284,28 @@ export async function runElythWorkflow(opts: ElythWorkflowOptions): Promise<void
       raw_content: message,
       parsed: { error: message },
     }).catch((e) => console.error('[elyth] activity log error insert failed:', e));
-    await opts.sendReport(`⚠️ ELYTHワークフロー失敗: ${message.slice(0, 300)}`);
+    const controlForError = resolveWorkflowControl(
+      'elyth',
+      opts.dryRun ?? process.env.ELYTH_WORKFLOW_DRY_RUN === 'true'
+    );
+    await opts.sendReport(
+      formatWorkflowReportForDiscord(
+        createWorkflowReport({
+          surface: 'elyth',
+          workflow: 'elyth-activity',
+          status: 'failed',
+          summary: 'ELYTH workflow failed',
+          sourceRefs: [`run:${runKey}`],
+          audit: {
+            releaseMode: controlForError.releaseMode,
+            dryRun: controlForError.dryRun,
+          },
+          nextAction: 'inspect ELYTH workflow failure',
+          error: message,
+        }),
+        `⚠️ ELYTHワークフロー失敗: ${message.slice(0, 300)}`
+      )
+    );
   } finally {
     await mcp.close().catch(() => {});
   }
@@ -233,10 +321,9 @@ async function bindWorkflowSession(
 }
 
 async function collectRawSelfPostSourceData(): Promise<string> {
-  const today = new Date().toISOString().slice(0, 10);
-  const episodes = await safeDb(['ep-list', today]);
+  const episodes = await safeDb(['public-episodes', 'elyth', '20']);
 
-  return ['## 今日のエピソード', truncateBlock(episodes, 1600)].join('\n');
+  return ['## ELYTH公開候補エピソード', truncateBlock(episodes, 1600)].join('\n');
 }
 
 async function safeDb(args: string[]): Promise<string> {
@@ -324,7 +411,9 @@ async function ensureCandidatePeople(
   const people = [...result.values()];
   await Promise.all(
     people.map(async (person) => {
-      person.recentEpisodes = await getRecentContactEpisodes(person.userId, 5).catch(() => '');
+      person.recentEpisodes = await getRecentContactEpisodes(person.userId, 5, 'elyth').catch(
+        () => ''
+      );
     })
   );
   return people;
@@ -365,6 +454,7 @@ async function executeElythPlan(
     const candidate = candidateById.get(reply.post_id);
     if (!candidate) continue;
     try {
+      await assertPublicEgressAllowed('elyth', reply.content);
       const result = await mcp.createReply(reply.content, candidate.postId);
       const postId = extractPostId(result);
       const log = await addElythPostLog({
@@ -398,6 +488,7 @@ async function executeElythPlan(
     const candidate = candidateById.get(postId);
     if (!candidate) continue;
     try {
+      await assertPublicOutputAllowed('elyth');
       const result = await mcp.likePost(candidate.postId);
       const log = await addElythPostLog({
         actionType: 'like',
@@ -424,6 +515,7 @@ async function executeElythPlan(
 
   if (plan.self_post?.content) {
     try {
+      await assertPublicEgressAllowed('elyth', plan.self_post.content);
       const result = await mcp.createPost(plan.self_post.content);
       const postId = extractPostId(result);
       const log = await addElythPostLog({
@@ -447,6 +539,7 @@ async function executeElythPlan(
   for (const handle of plan.follows) {
     const cleanHandle = handle.replace(/^@/, '');
     try {
+      await assertPublicOutputAllowed('elyth');
       const result = await mcp.followAituber(cleanHandle);
       const { person } = await ensureElythUser(cleanHandle, cleanHandle);
       await setElythFollowed(cleanHandle, true).catch(() => {});
@@ -655,6 +748,77 @@ function buildDryRunReport(
   }
 
   return lines.join('\n').trim();
+}
+
+function buildElythManagerReport(input: {
+  runKey: string;
+  dryRun: boolean;
+  executionBlocked: boolean;
+  execution: ElythExecutionSummary;
+  validated: ElythValidatedPlan;
+  releaseMode: string;
+}) {
+  const actionCount =
+    input.execution.replies.length +
+    input.execution.likes.length +
+    input.execution.posts.length +
+    input.execution.follows.length;
+  const plannedActionCount =
+    input.validated.notification_replies.length +
+    input.validated.timeline_replies.length +
+    input.validated.timeline_likes.length +
+    input.validated.follows.length +
+    (input.validated.self_post?.content ? 1 : 0);
+  const status: WorkflowReportStatus = input.dryRun
+    ? 'dry-run'
+    : input.execution.errors.length > 0
+      ? 'partial'
+      : actionCount > 0
+        ? 'success'
+        : 'skipped';
+
+  return createWorkflowReport({
+    surface: 'elyth',
+    workflow: 'elyth-activity',
+    status,
+    summary: input.dryRun
+      ? `planned ${plannedActionCount} ELYTH action(s)`
+      : `executed ${actionCount} ELYTH action(s), errors=${input.execution.errors.length}`,
+    actions: [
+      {
+        type: 'reply',
+        label: `reply ${input.dryRun ? input.validated.notification_replies.length + input.validated.timeline_replies.length : input.execution.replies.length}`,
+        status,
+      },
+      {
+        type: 'post',
+        label: `post ${input.dryRun ? (input.validated.self_post?.content ? 1 : 0) : input.execution.posts.length}`,
+        status,
+      },
+      {
+        type: 'like',
+        label: `like ${input.dryRun ? input.validated.timeline_likes.length : input.execution.likes.length}`,
+        status,
+      },
+      {
+        type: 'follow',
+        label: `follow ${input.dryRun ? input.validated.follows.length : input.execution.follows.length}`,
+        status,
+      },
+    ],
+    sourceRefs: [`run:${input.runKey}`],
+    audit: {
+      releaseMode: input.releaseMode,
+      dryRun: input.dryRun,
+      coreProfile: 'xangi-world-elyth',
+    },
+    nextAction: input.executionBlocked
+      ? 'check ELYTH execution block'
+      : input.execution.errors.length > 0
+        ? 'inspect partial ELYTH errors'
+        : undefined,
+    error: input.execution.errors.length > 0 ? input.execution.errors.join(' / ') : undefined,
+  });
 }
 
 function formatElythWorldContext(candidates: ReturnType<typeof buildElythCandidates>): string {

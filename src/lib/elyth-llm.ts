@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { buildNikechanCorePrompt } from './nikechan-core.js';
 import {
   emptyElythPlan,
   formatCandidateForPrompt,
@@ -317,7 +318,7 @@ function runClaudeWithArgs(
     });
     proc.on('error', reject);
 
-    proc.stdin.write(prompt);
+    proc.stdin.write(buildNikechanCorePrompt('xangi-world-elyth', prompt, { warn: true }));
     proc.stdin.end();
   });
 }

@@ -1,5 +1,6 @@
 import type { Client, Message } from 'discord.js';
 import { chunkDiscordMessage, sanitizeChannelMentions } from './message-utils.js';
+import { assertPublicEgressAllowed, assertPublicOutputAllowed } from './lib/public-safety.js';
 
 export interface DiscordCommandResult {
   handled: boolean;
@@ -32,6 +33,8 @@ export async function handleDiscordCommand(
     }
     const content = sendMatch[2];
     try {
+      await assertPublicOutputAllowed('discord');
+      await assertPublicEgressAllowed('discord', content);
       let channel = await client.channels.fetch(channelId).catch(() => null);
       if (!channel && fallbackChannelId && channelId !== fallbackChannelId) {
         console.warn(
@@ -82,6 +85,8 @@ export async function handleDiscordCommand(
     const filePath = sendImageMatch[2];
     const message = sendImageMatch[3];
     try {
+      await assertPublicOutputAllowed('discord');
+      if (message) await assertPublicEgressAllowed('discord', message);
       const { existsSync } = await import('node:fs');
       if (!existsSync(filePath)) {
         console.error(`[xangi] File not found: ${filePath}`);
