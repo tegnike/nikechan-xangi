@@ -9,6 +9,7 @@ import { createWorkflowReport, type WorkflowReportStatus } from '../lib/workflow
 import {
   isXWorkerSelfTweetEnabled,
   runXWorkerWorkflow,
+  type XWorkerWorkflowRequest,
   type XWorkerWorkflowReport,
 } from '../lib/x-worker-client.js';
 import {
@@ -1279,9 +1280,9 @@ function workerRevisionNote(report: XWorkerWorkflowReport): string {
   const skill = report.audit.hermesSkill;
   if (skill && typeof skill === 'object' && !Array.isArray(skill)) {
     const status = stringFromUnknown((skill as Record<string, unknown>).status);
-    if (status === 'changed') return 'Hermes native skill updated during dry-run';
+    if (status === 'changed') return 'Hermes native skill updated during candidate generation';
   }
-  return 'nikechan-x-worker / Hermes dry-run candidate';
+  return 'nikechan-x-worker / Hermes candidate';
 }
 
 function stringFromUnknown(value: unknown): string | undefined {
@@ -1726,7 +1727,7 @@ async function createPendingSelfTweetFromWorker(
   const report = await runXWorkerWorkflow({
     workflow: 'self-tweet',
     surface: 'x',
-    mode: 'dry-run',
+    mode: xWorkerSelfTweetMode(),
     requested_by: opts.authorName === 'scheduler' ? 'xangi-scheduler' : 'xangi',
     schedule_id: opts.scheduleId,
     correlation_id: correlationId,
@@ -1882,39 +1883,55 @@ async function handleWorkerSelfTweetApproval(
 
   if (decision.action === 'post') {
     const draft = selectDraft(pending, decision.selectedDraftId);
+    await opts.setPhase?.('tool_use');
+    const postResult = await publishSelectedSelfTweet(draft, opts);
+    const dryRun = isTwitterWorkflowDryRun();
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
       workflow: 'self-tweet',
       stage: 'execute',
       raw_content: draft.text,
       parsed: {
-        action: 'approve_worker_dry_run',
-        dry_run: true,
+        action: 'tweet',
+        dry_run: dryRun,
         selected_draft_id: draft.id,
         topic: draft.topic,
+        result: postResult,
         worker_report: pending.workerReport,
       },
     });
+    if (!dryRun) {
+      await recordTwitterLocalEpisode(
+        `self-tweetで案${draftLabel(pending, draft.id)}を投稿。ネタ: ${truncateInline(draft.topic, 80)}。本文「${truncateInline(draft.text, 80)}」`
+      );
+    }
     await clearPendingSelfTweet(pending.channelId, 'executed');
     await setTwitterRunState('self_tweet_last_execute', {
       at: new Date().toISOString(),
       selected_draft_id: draft.id,
       topic: draft.topic,
       worker: 'nikechan-x-worker',
-      dry_run: true,
+      dry_run: dryRun,
+      result: postResult,
     });
     await opts.setPhase?.('text');
     await opts.sendReport(
       formatWorkflowReportForDiscord(
         buildTwitterManagerReport({
           workflow: 'self-tweet',
-          status: 'dry-run',
-          summary: 'nikechan-x-worker self tweet approved in dry-run',
+          status: dryRun ? 'dry-run' : 'success',
+          summary: dryRun
+            ? 'nikechan-x-worker self tweet approved in dry-run'
+            : 'nikechan-x-worker self tweet posted',
           runKey,
-          actions: [{ type: 'tweet', label: `tweet ${draft.id}`, status: 'dry-run' }],
-          nextAction: 'worker live posting is not enabled yet',
+          actions: [
+            { type: 'tweet', label: `tweet ${draft.id}`, status: dryRun ? 'dry-run' : 'success' },
+          ],
+          nextAction: dryRun ? 'review dry-run result before live posting' : undefined,
         }),
-        `承認として受け取りました。現段階の nikechan-x-worker は dry-run 専用なので、X投稿は実行していません。\n\n予定本文:\n「${draft.mechanicalCheck.checkedText || draft.text}」`
+        dryRun
+          ? `承認として受け取りました。dry-run設定のため、X投稿は実行していません。\n\n予定本文:\n「${draft.mechanicalCheck.checkedText || draft.text}」`
+          : `投稿まで完了しました。\n${postResult || '（投稿結果のURL取得なし）'}`
       )
     );
     return;
@@ -2248,6 +2265,27 @@ function selectDraft(pending: PendingSelfTweet, selectedDraftId?: string): Revie
   return pending.drafts[0];
 }
 
+function xWorkerSelfTweetMode(): XWorkerWorkflowRequest['mode'] {
+  const control = resolveWorkflowControl('x', process.env.TWITTER_WORKFLOW_DRY_RUN === 'true');
+  switch (control.releaseMode) {
+    case 'live':
+      return 'live';
+    case 'canary-live':
+      return 'canary';
+    case 'shadow':
+      return 'shadow';
+    case 'dry-run':
+    case 'canary-dry-run':
+    default:
+      return 'dry-run';
+  }
+}
+
+function isWorkerReportDryRun(report?: XWorkerWorkflowReport): boolean {
+  const dryRun = report?.audit?.dryRun;
+  return typeof dryRun === 'boolean' ? dryRun : isTwitterWorkflowDryRun();
+}
+
 function formatApprovalRequest(pending: PendingSelfTweet, revised = false): string {
   const heading = revised ? '📝 ツイート修正版:' : '📝 ツイート案:';
   const lines = [heading, ''];
@@ -2257,7 +2295,11 @@ function formatApprovalRequest(pending: PendingSelfTweet, revised = false): stri
       skillStatus && typeof skillStatus === 'object' && !Array.isArray(skillStatus)
         ? stringFromUnknown((skillStatus as Record<string, unknown>).status)
         : undefined;
-    lines.push('nikechan-x-worker / Hermes dry-run で生成しました。X投稿はまだ実行しません。');
+    lines.push(
+      isWorkerReportDryRun(pending.workerReport)
+        ? 'nikechan-x-worker / Hermes dry-run で生成しました。X投稿はまだ実行しません。'
+        : 'nikechan-x-worker / Hermes で生成しました。承認後にXへ投稿します。'
+    );
     if (skillNote) lines.push(`Hermes skill: ${skillNote}`);
     const skillChanges = formatHermesSkillChanges(skillStatus);
     if (skillChanges.length) {
