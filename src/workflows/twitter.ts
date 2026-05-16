@@ -7,6 +7,11 @@ import { assertPublicEgressAllowed, assertPublicOutputAllowed } from '../lib/pub
 import { formatWorkflowReportForDiscord, resolveWorkflowControl } from '../lib/workflow-manager.js';
 import { createWorkflowReport, type WorkflowReportStatus } from '../lib/workflow-report.js';
 import {
+  isXWorkerSelfTweetEnabled,
+  runXWorkerWorkflow,
+  type XWorkerWorkflowReport,
+} from '../lib/x-worker-client.js';
+import {
   collectSelfTweetSourcesWithAI,
   decideMentionNickname,
   generateHashtagReactionPlan,
@@ -66,6 +71,7 @@ export interface TwitterWorkflowOptions {
   bindSession?: (sessionId: string, reason: string) => Promise<void> | void;
   setPhase?: (phase: 'thinking' | 'tool_use' | 'text') => Promise<void> | void;
   messageId?: string;
+  scheduleId?: string;
   channelId?: string;
   authorId?: string;
   authorName?: string;
@@ -74,10 +80,13 @@ export interface TwitterWorkflowOptions {
 
 interface PendingSelfTweet {
   kind: 'self-tweet';
+  origin?: 'xangi' | 'nikechan-x-worker';
   channelId: string;
   createdAt: string;
   revisionCount: number;
   draftGenerationSessionId?: string;
+  workerCorrelationId?: string;
+  workerReport?: XWorkerWorkflowReport;
   emotionText: string;
   todayTopics: string;
   recentTweets: string;
@@ -138,7 +147,9 @@ export async function runSelfTweetWorkflow(opts: TwitterWorkflowOptions): Promis
 
   try {
     await opts.setPhase?.('thinking');
-    const pending = await createPendingSelfTweet(channelId, 0);
+    const pending = isXWorkerSelfTweetEnabled()
+      ? await createPendingSelfTweetFromWorker(channelId, opts, 0)
+      : await createPendingSelfTweet(channelId, 0);
     await bindWorkflowSession(opts, pending.draftGenerationSessionId, 'self-tweet:draft');
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
@@ -260,6 +271,11 @@ export async function handleSelfTweetApproval(
 
   const normalized = prompt.trim();
   if (!normalized || normalized.startsWith('/')) return false;
+
+  if (pending.origin === 'nikechan-x-worker') {
+    await handleWorkerSelfTweetApproval(normalized, pending, opts, runKey);
+    return true;
+  }
 
   await opts.setPhase?.('thinking');
   const decision = await interpretMasterSelfTweetReply({
@@ -1236,6 +1252,67 @@ function okTweetReview() {
   };
 }
 
+function workerReportToSourceCollection(report: XWorkerWorkflowReport): SelfTweetSourceCollection {
+  return {
+    summary: report.summary,
+    candidates: report.sourceRefs.map((ref, index) => ({
+      id: sourceRefId(ref, index),
+      title: ref.label || ref.id || ref.url || ref.type,
+      sourceType: ref.type,
+      sourceRefs: [ref.id, ref.url].filter((value): value is string => Boolean(value)),
+      details: JSON.stringify(ref),
+      angle: 'nikechan-x-worker / Hermes',
+      duplicateRisk: 'checked by worker context and xangi guard',
+    })),
+    rejected: [],
+    recentPatternNotes: stringFromUnknown(report.audit.hermesRuntime)
+      ? `Hermes runtime: ${String(report.audit.hermesRuntime)}`
+      : 'nikechan-x-worker',
+  };
+}
+
+function sourceRefId(ref: { type: string; id?: string; url?: string }, index: number): string {
+  return ref.id || ref.url || `${ref.type}-${index + 1}`;
+}
+
+function workerRevisionNote(report: XWorkerWorkflowReport): string {
+  const skill = report.audit.hermesSkill;
+  if (skill && typeof skill === 'object' && !Array.isArray(skill)) {
+    const status = stringFromUnknown((skill as Record<string, unknown>).status);
+    if (status === 'changed') return 'Hermes native skill updated during dry-run';
+  }
+  return 'nikechan-x-worker / Hermes dry-run candidate';
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function interpretWorkerSelfTweetReply(
+  message: string,
+  pending: PendingSelfTweet
+): { action: 'post' | 'revise' | 'cancel'; selectedDraftId?: string; instruction: string } {
+  const selectedDraftId = extractDraftSelection(message, pending);
+  if (/(見送り|キャンセル|やめ|やめて|不要|cancel|skip)/iu.test(message)) {
+    return { action: 'cancel', selectedDraftId, instruction: message };
+  }
+  if (/^(ok|OK|おk|承認|投稿|投稿して|これで|それで|そのまま|go|yes)$/iu.test(message.trim())) {
+    return { action: 'post', selectedDraftId, instruction: message };
+  }
+  if (selectedDraftId && /^(案)?\s*\d+\s*(で|を|にする|投稿|ok|OK)?$/iu.test(message.trim())) {
+    return { action: 'post', selectedDraftId, instruction: message };
+  }
+  return { action: 'revise', selectedDraftId, instruction: message };
+}
+
+function extractDraftSelection(message: string, pending: PendingSelfTweet): string | undefined {
+  const draftId = pending.drafts.find((draft) => message.includes(draft.id))?.id;
+  if (draftId) return draftId;
+  const match = message.match(/(?:案|候補)?\s*([1-5])/u);
+  if (!match) return undefined;
+  return pending.drafts[Number(match[1]) - 1]?.id;
+}
+
 async function revisePendingMentionFromMaster(
   pending: PendingMentionReaction,
   instruction: string
@@ -1632,6 +1709,77 @@ async function createPendingSelfTweet(
   };
 }
 
+async function createPendingSelfTweetFromWorker(
+  channelId: string,
+  opts: TwitterWorkflowOptions,
+  revisionCount: number,
+  feedback?: {
+    verdict: 'revise';
+    text: string;
+    previous_preview?: string;
+  }
+): Promise<PendingSelfTweet> {
+  const correlationId =
+    opts.messageId || opts.scheduleId
+      ? `xangi:self-tweet:${opts.scheduleId ?? 'manual'}:${opts.messageId ?? channelId}:${revisionCount}`
+      : `xangi:self-tweet:${channelId}:${Date.now()}:${revisionCount}`;
+  const report = await runXWorkerWorkflow({
+    workflow: 'self-tweet',
+    surface: 'x',
+    mode: 'dry-run',
+    requested_by: opts.authorName === 'scheduler' ? 'xangi-scheduler' : 'xangi',
+    schedule_id: opts.scheduleId,
+    correlation_id: correlationId,
+    constraints: {
+      require_approval: true,
+      max_actions: Number(process.env.NIKECHAN_X_WORKER_SELF_TWEET_MAX_ACTIONS ?? 3),
+    },
+    context: feedback ? { feedback } : undefined,
+  });
+  const sourceCollection = workerReportToSourceCollection(report);
+  const drafts = await Promise.all(
+    report.actions
+      .filter((action) => action.type === 'post_tweet' && action.preview)
+      .slice(0, 5)
+      .map(async (action, index): Promise<ReviewedSelfTweetDraft> => {
+        const text = sanitizeTweetText(String(action.preview));
+        const topic = stringFromUnknown(action.metadata?.topic) || `worker self-tweet ${index + 1}`;
+        return {
+          id: `w${index + 1}`,
+          text,
+          topic,
+          sourceCandidateIds: report.sourceRefs.map((ref, refIndex) => sourceRefId(ref, refIndex)),
+          angle: stringFromUnknown(action.metadata?.hermes_reasoning) || report.summary,
+          selfReviewMemo: action.reason || report.summary,
+          mechanicalCheck: await runMechanicalChecks(text, { topic }),
+          review: okTweetReview(),
+          revisionNotes: workerRevisionNote(report),
+        };
+      })
+  );
+  if (!drafts.length) {
+    throw new Error(`nikechan-x-worker returned no tweet candidates: ${report.summary}`);
+  }
+  return {
+    kind: 'self-tweet',
+    origin: 'nikechan-x-worker',
+    channelId,
+    createdAt: report.createdAt || new Date().toISOString(),
+    revisionCount,
+    workerCorrelationId: correlationId,
+    workerReport: report,
+    emotionText: '',
+    todayTopics: '',
+    recentTweets: '',
+    sourceMode: 'memory',
+    personContext: '',
+    performanceContext: '',
+    runStateContext: `nikechan-x-worker audit=${JSON.stringify(report.audit)}`,
+    sourceCollection,
+    drafts,
+  };
+}
+
 async function revisePendingFromMaster(
   pending: PendingSelfTweet,
   instruction: string,
@@ -1703,6 +1851,114 @@ async function revisePendingFromMaster(
     draftGenerationSessionId: revised.sessionId ?? pending.draftGenerationSessionId,
     drafts: reviewedDrafts,
   };
+}
+
+async function handleWorkerSelfTweetApproval(
+  normalized: string,
+  pending: PendingSelfTweet,
+  opts: TwitterWorkflowOptions,
+  runKey: string
+): Promise<void> {
+  const decision = interpretWorkerSelfTweetReply(normalized, pending);
+  await addTwitterActivityLog({
+    ...activityMeta(opts, runKey),
+    workflow: 'self-tweet',
+    stage: 'interpret',
+    raw_content: normalized,
+    parsed: { decision, worker_report: pending.workerReport },
+  });
+
+  if (decision.action === 'cancel') {
+    await clearPendingSelfTweet(pending.channelId, 'cancelled');
+    await setTwitterRunState('self_tweet_last_cancel', {
+      at: new Date().toISOString(),
+      message: normalized,
+      worker: 'nikechan-x-worker',
+    });
+    await opts.setPhase?.('text');
+    await opts.sendReport('了解です。今回は見送ります。');
+    return;
+  }
+
+  if (decision.action === 'post') {
+    const draft = selectDraft(pending, decision.selectedDraftId);
+    await addTwitterActivityLog({
+      ...activityMeta(opts, runKey),
+      workflow: 'self-tweet',
+      stage: 'execute',
+      raw_content: draft.text,
+      parsed: {
+        action: 'approve_worker_dry_run',
+        dry_run: true,
+        selected_draft_id: draft.id,
+        topic: draft.topic,
+        worker_report: pending.workerReport,
+      },
+    });
+    await clearPendingSelfTweet(pending.channelId, 'executed');
+    await setTwitterRunState('self_tweet_last_execute', {
+      at: new Date().toISOString(),
+      selected_draft_id: draft.id,
+      topic: draft.topic,
+      worker: 'nikechan-x-worker',
+      dry_run: true,
+    });
+    await opts.setPhase?.('text');
+    await opts.sendReport(
+      formatWorkflowReportForDiscord(
+        buildTwitterManagerReport({
+          workflow: 'self-tweet',
+          status: 'dry-run',
+          summary: 'nikechan-x-worker self tweet approved in dry-run',
+          runKey,
+          actions: [{ type: 'tweet', label: `tweet ${draft.id}`, status: 'dry-run' }],
+          nextAction: 'worker live posting is not enabled yet',
+        }),
+        `承認として受け取りました。現段階の nikechan-x-worker は dry-run 専用なので、X投稿は実行していません。\n\n予定本文:\n「${draft.mechanicalCheck.checkedText || draft.text}」`
+      )
+    );
+    return;
+  }
+
+  await opts.setPhase?.('thinking');
+  const previous = decision.selectedDraftId
+    ? selectDraft(pending, decision.selectedDraftId).text
+    : pending.drafts.map((draft) => draft.text).join('\n---\n');
+  const revised = await createPendingSelfTweetFromWorker(
+    pending.channelId,
+    opts,
+    pending.revisionCount + 1,
+    {
+      verdict: 'revise',
+      text: decision.instruction,
+      previous_preview: previous,
+    }
+  );
+  await savePendingSelfTweet(pending.channelId, revised);
+  await addTwitterActivityLog({
+    ...activityMeta(opts, runKey),
+    workflow: 'self-tweet',
+    stage: 'revise',
+    raw_content: revised.drafts.map((draft) => draft.text).join('\n---\n'),
+    parsed: {
+      instruction: decision.instruction,
+      revision_count: revised.revisionCount,
+      worker_report: revised.workerReport,
+      drafts: revised.drafts,
+    },
+  });
+  await opts.setPhase?.('text');
+  if (decision.selectedDraftId) {
+    await opts.sendReport(
+      formatTargetedSelfTweetRevisionRequest(
+        revised,
+        decision.selectedDraftId,
+        'Hermesで直しました。'
+      )
+    );
+  } else {
+    await opts.sendReport(formatApprovalRequest(revised, true));
+  }
 }
 
 async function prepareDrafts(
@@ -1995,8 +2251,35 @@ function selectDraft(pending: PendingSelfTweet, selectedDraftId?: string): Revie
 function formatApprovalRequest(pending: PendingSelfTweet, revised = false): string {
   const heading = revised ? '📝 ツイート修正版:' : '📝 ツイート案:';
   const lines = [heading, ''];
+  if (pending.origin === 'nikechan-x-worker') {
+    const skillStatus = pending.workerReport?.audit.hermesSkill;
+    const skillNote =
+      skillStatus && typeof skillStatus === 'object' && !Array.isArray(skillStatus)
+        ? stringFromUnknown((skillStatus as Record<string, unknown>).status)
+        : undefined;
+    lines.push('nikechan-x-worker / Hermes dry-run で生成しました。X投稿はまだ実行しません。');
+    if (skillNote) lines.push(`Hermes skill: ${skillNote}`);
+    const skillChanges = formatHermesSkillChanges(skillStatus);
+    if (skillChanges.length) {
+      lines.push('改善内容:');
+      skillChanges.forEach((change) => lines.push(`- ${change}`));
+    }
+    const snapshotNote = formatHermesSkillSnapshot(skillStatus);
+    if (snapshotNote) lines.push(snapshotNote);
+    lines.push('');
+  }
   pending.drafts.forEach((draft, index) => {
     lines.push(`${index + 1}. 「${draft.text}」`);
+    if (pending.origin === 'nikechan-x-worker') {
+      lines.push(`   観点: ${truncateInline(draft.topic, 100)}`);
+      const reason = displayWorkerReason(draft.angle);
+      if (reason) lines.push(`   理由: ${reason}`);
+      if (draft.revisionNotes.includes('skill updated')) {
+        lines.push('   学習: Hermes native skill を更新済み');
+      }
+      lines.push('');
+      return;
+    }
     const sourceTitles = draft.sourceCandidateIds
       .map(
         (id) => pending.sourceCollection.candidates.find((candidate) => candidate.id === id)?.title
@@ -2036,6 +2319,19 @@ function formatTargetedSelfTweetRevisionRequest(
   if (sourceTitles || draft.angle) {
     lines.push(`元ソース: ${sourceTitles || '自然発想'} / 切り口: ${draft.angle || '未指定'}`);
   }
+  if (pending.origin === 'nikechan-x-worker') {
+    lines.length = 0;
+    lines.push(
+      responseMessage?.trim() || `Hermesで直しました。${label}だけ直すと、これでどうでしょうか。`,
+      '',
+      `📝 ${label}の修正版:`,
+      '',
+      `「${draft.text}」`,
+      `観点: ${truncateInline(draft.topic, 100)}`
+    );
+    const reason = displayWorkerReason(draft.angle);
+    if (reason) lines.push(`理由: ${reason}`);
+  }
   if (draft.revisionNotes) lines.push(`修正: ${draft.revisionNotes}`);
   lines.push('', 'これで投稿する場合は「これで」「投稿して」などと返信してください。');
   return lines.join('\n').trim();
@@ -2044,6 +2340,54 @@ function formatTargetedSelfTweetRevisionRequest(
 function draftLabel(pending: PendingSelfTweet, draftId: string): string {
   const index = pending.drafts.findIndex((draft) => draft.id === draftId);
   return index >= 0 ? `案${index + 1}` : draftId;
+}
+
+function displayWorkerReason(reason: string): string | undefined {
+  const normalized = reason.trim();
+  if (
+    !normalized ||
+    /core snapshot fallback|canonical memory disabled|skill rules/iu.test(normalized)
+  ) {
+    return undefined;
+  }
+  return truncateInline(normalized, 140);
+}
+
+function formatHermesSkillChanges(skillStatus: unknown): string[] {
+  if (!skillStatus || typeof skillStatus !== 'object' || Array.isArray(skillStatus)) return [];
+  const record = skillStatus as Record<string, unknown>;
+  if (record.status !== 'changed') return [];
+  const added = Array.isArray(record.addedLines) ? record.addedLines : [];
+  const removed = Array.isArray(record.removedLines) ? record.removedLines : [];
+  return [
+    ...added
+      .filter((line): line is string => typeof line === 'string' && line.trim().length > 0)
+      .map((line) => `追加: ${formatSkillChangeLine(line)}`),
+    ...removed
+      .filter((line): line is string => typeof line === 'string' && line.trim().length > 0)
+      .map((line) => `削除: ${formatSkillChangeLine(line)}`),
+  ].slice(0, 5);
+}
+
+function formatHermesSkillSnapshot(skillStatus: unknown): string | undefined {
+  if (!skillStatus || typeof skillStatus !== 'object' || Array.isArray(skillStatus))
+    return undefined;
+  const snapshot = (skillStatus as Record<string, unknown>).snapshot;
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return undefined;
+  const record = snapshot as Record<string, unknown>;
+  const status = stringFromUnknown(record.status);
+  if (status === 'committed') {
+    const sha = stringFromUnknown(record.commitSha);
+    return `skill snapshot commit: ${sha ? sha.slice(0, 12) : 'created'}`;
+  }
+  if (status === 'failed') {
+    return `skill snapshot commit: failed (${truncateInline(stringFromUnknown(record.reason) || 'unknown', 120)})`;
+  }
+  return undefined;
+}
+
+function formatSkillChangeLine(line: string): string {
+  return truncateInline(line.replace(/^[-*]\s*/u, '').trim(), 160);
 }
 
 function formatMentionApprovalRequest(pending: PendingMentionReaction, revised = false): string {
@@ -2640,7 +2984,7 @@ async function getPendingSelfTweet(channelId: string): Promise<PendingSelfTweet 
 }
 
 async function savePendingSelfTweet(channelId: string, pending: PendingSelfTweet): Promise<void> {
-  if (!shouldPersistTwitterWorkflow()) return;
+  if (!shouldPersistTwitterWorkflow() && pending.origin !== 'nikechan-x-worker') return;
   const state = await loadState();
   state.pendingSelfTweets[channelId] = pending;
   delete state.closedSelfTweets[channelId];
@@ -2651,8 +2995,13 @@ async function clearPendingSelfTweet(
   channelId: string,
   reason: ClosedWorkflowChannel['reason']
 ): Promise<void> {
-  if (!shouldPersistTwitterWorkflow()) return;
   const state = await loadState();
+  if (
+    !shouldPersistTwitterWorkflow() &&
+    state.pendingSelfTweets[channelId]?.origin !== 'nikechan-x-worker'
+  ) {
+    return;
+  }
   delete state.pendingSelfTweets[channelId];
   state.closedSelfTweets[channelId] = {
     closedAt: new Date().toISOString(),

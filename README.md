@@ -129,8 +129,19 @@ pm2 logs xangi     # ログ確認
 | `MAX_PROCESSES` | 同時実行プロセス数の上限 | `10` |
 | `IDLE_TIMEOUT_MS` | アイドルプロセスの自動終了時間（ミリ秒） | `1800000`（30分） |
 | `GH_TOKEN` | GitHub CLI用トークン | - |
+| `NIKECHAN_X_WORKER_SELF_TWEET_ENABLED` | `/self-tweet` を独立 `nikechan-x-worker` 経由にする | `false` |
+| `NIKECHAN_X_WORKER_URL` | worker HTTP endpoint。設定時は `POST /workflow` を使う | - |
+| `NIKECHAN_X_WORKER_COMMAND` | worker CLI command。HTTP未設定時に使う | `nikechan-x-worker` |
+| `NIKECHAN_X_WORKER_ARGS` | worker CLI args。`{json}` が WorkflowRequest に置換される | `run --json {json}` |
+| `NIKECHAN_X_WORKER_CWD` | worker CLI の作業ディレクトリ | xangi の cwd |
 
 全ての環境変数は [設計ドキュメント](docs/design.md) を参照してください。
+
+### nikechan-x-worker self-tweet
+
+`NIKECHAN_X_WORKER_SELF_TWEET_ENABLED=true` の場合、xangi は Discord/scheduler/approval UI だけを担当し、`/self-tweet` の案生成と修正は `nikechan-x-worker` に委譲します。
+
+Discord で表示された案に対して、番号承認・見送り・修正指示を返信できます。修正指示は `WorkflowRequest.context.feedback` として worker に再送され、Hermes が再生成します。現段階では worker 側の X 投稿は dry-run 専用なので、承認しても xangi は実投稿しません。
 
 ## ドキュメント
 

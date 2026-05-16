@@ -115,6 +115,7 @@ interface WorkflowSentReport {
 interface DirectWorkflowContext {
   channelId: string;
   messageId?: string;
+  scheduleId?: string;
   authorId?: string;
   authorName?: string;
   messageCreatedAt?: string;
@@ -1008,6 +1009,7 @@ async function main() {
           prompt,
           {
             channelId: threadId || channelId,
+            scheduleId: options?.scheduleId,
             authorName: 'scheduler',
             messageCreatedAt: new Date().toISOString(),
             bindSession: bindWorkflowSession,
