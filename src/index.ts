@@ -54,6 +54,7 @@ import {
   handleSelfTweetApproval,
   isMentionReactionWorkflowPrompt,
   isSelfTweetWorkflowPrompt,
+  parseSelfTweetSourceMode,
   runHashtagReactionWorkflow,
   runMentionReactionWorkflow,
   runSelfTweetWorkflow,
@@ -217,6 +218,7 @@ async function runDirectWorkflow(
     await runSelfTweetWorkflow({
       ...context,
       setPhase: context.setPhase,
+      requestedSourceMode: parseSelfTweetSourceMode(prompt),
     });
     return true;
   }

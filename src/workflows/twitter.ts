@@ -44,11 +44,18 @@ const WORKDIR = process.env.WORKSPACE_PATH || process.cwd();
 const DATA_DIR = process.env.DATA_DIR || process.env.XANGI_DATA_DIR || join(WORKDIR, '.xangi');
 const STATE_PATH = join(DATA_DIR, 'twitter-workflow-state.json');
 const FORBIDDEN_TEXT_PATTERNS = [/!discord/i, /!schedule/i, /<#\d+>/];
-const SELF_TWEET_SOURCE_MODES = ['daily_life', 'tech', 'memory', 'random'] as const;
+const SELF_TWEET_SOURCE_MODES = [
+  'presence',
+  'daily_life',
+  'tech',
+  'news',
+  'memory',
+  'random',
+] as const;
 const PRESENTED_TOPIC_COOLDOWN_HOURS = 72;
 const PRESENTED_TOPIC_COOLDOWN_LIMIT = 40;
 
-type SelfTweetSourceMode = (typeof SELF_TWEET_SOURCE_MODES)[number];
+export type SelfTweetSourceMode = (typeof SELF_TWEET_SOURCE_MODES)[number];
 
 interface PresentedSelfTweetTopic {
   at: string;
@@ -71,6 +78,7 @@ export interface TwitterWorkflowOptions {
   sendReport: (text: string) => Promise<TwitterSentReport | void>;
   bindSession?: (sessionId: string, reason: string) => Promise<void> | void;
   setPhase?: (phase: 'thinking' | 'tool_use' | 'text') => Promise<void> | void;
+  requestedSourceMode?: SelfTweetSourceMode;
   messageId?: string;
   scheduleId?: string;
   channelId?: string;
@@ -127,6 +135,14 @@ export function isSelfTweetWorkflowPrompt(prompt: string): boolean {
   return /^\/self-tweet(?:\s|（|\(|$)/.test(prompt.trim());
 }
 
+export function parseSelfTweetSourceMode(prompt: string): SelfTweetSourceMode | undefined {
+  const match = prompt.trim().match(/^\/self-tweet(?:\s+|[（(])([a-z_]+)(?:[）)]|\s|$)/u);
+  const mode = match?.[1];
+  return SELF_TWEET_SOURCE_MODES.some((candidate) => candidate === mode)
+    ? (mode as SelfTweetSourceMode)
+    : undefined;
+}
+
 export function isMentionReactionWorkflowPrompt(prompt: string): boolean {
   return /^\/mention-reaction(?:\s|（|\(|$)|^メンションチェック$|^リプライチェック$|^リプ反応$/.test(
     prompt.trim()
@@ -150,7 +166,7 @@ export async function runSelfTweetWorkflow(opts: TwitterWorkflowOptions): Promis
     await opts.setPhase?.('thinking');
     const pending = isXWorkerSelfTweetEnabled()
       ? await createPendingSelfTweetFromWorker(channelId, opts, 0)
-      : await createPendingSelfTweet(channelId, 0);
+      : await createPendingSelfTweet(channelId, 0, opts.requestedSourceMode);
     await bindWorkflowSession(opts, pending.draftGenerationSessionId, 'self-tweet:draft');
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
@@ -1663,9 +1679,13 @@ async function markTweetLogsChecked(ids: string[]): Promise<void> {
 
 async function createPendingSelfTweet(
   channelId: string,
-  revisionCount: number
+  revisionCount: number,
+  requestedSourceMode?: SelfTweetSourceMode
 ): Promise<PendingSelfTweet> {
-  const [emotion, rawSources] = await Promise.all([getEmotion(), collectRawSelfTweetSources()]);
+  const [emotion, rawSources] = await Promise.all([
+    getEmotion(),
+    collectRawSelfTweetSources(requestedSourceMode),
+  ]);
   const emotionText = formatEmotion(emotion);
   const sourceCollection = await collectSelfTweetSourcesWithAI({
     emotionText,
@@ -1718,7 +1738,8 @@ async function createPendingSelfTweetFromWorker(
     verdict: 'revise';
     text: string;
     previous_preview?: string;
-  }
+  },
+  requestedSourceMode = opts.requestedSourceMode
 ): Promise<PendingSelfTweet> {
   const correlationId =
     opts.messageId || opts.scheduleId
@@ -1735,7 +1756,10 @@ async function createPendingSelfTweetFromWorker(
       require_approval: true,
       max_actions: Number(process.env.NIKECHAN_X_WORKER_SELF_TWEET_MAX_ACTIONS ?? 3),
     },
-    context: feedback ? { feedback } : undefined,
+    context: {
+      ...(feedback ? { feedback } : {}),
+      ...(requestedSourceMode ? { sourceMode: requestedSourceMode } : {}),
+    },
   });
   const sourceCollection = workerReportToSourceCollection(report);
   const drafts = await Promise.all(
@@ -1772,7 +1796,8 @@ async function createPendingSelfTweetFromWorker(
     emotionText: '',
     todayTopics: '',
     recentTweets: '',
-    sourceMode: 'memory',
+    sourceMode:
+      stringToSelfTweetSourceMode(report.audit.sourceMode) ?? requestedSourceMode ?? 'memory',
     personContext: '',
     performanceContext: '',
     runStateContext: `nikechan-x-worker audit=${JSON.stringify(report.audit)}`,
@@ -1949,7 +1974,8 @@ async function handleWorkerSelfTweetApproval(
       verdict: 'revise',
       text: decision.instruction,
       previous_preview: previous,
-    }
+    },
+    pending.sourceMode
   );
   await savePendingSelfTweet(pending.channelId, revised);
   await addTwitterActivityLog({
@@ -2038,7 +2064,7 @@ async function prepareDrafts(
   return finalChecked.slice(0, 5);
 }
 
-async function collectRawSelfTweetSources(): Promise<{
+async function collectRawSelfTweetSources(requestedSourceMode?: SelfTweetSourceMode): Promise<{
   todayTopics: string;
   recentTweets: string;
   sourceMode: SelfTweetSourceMode;
@@ -2051,7 +2077,7 @@ async function collectRawSelfTweetSources(): Promise<{
     getTwitterRunStateValue('self_tweet_last_source_mode'),
     getRecentPresentedTopicCooldown(),
   ]);
-  const sourceMode = chooseSelfTweetSourceMode(lastSourceModeState);
+  const sourceMode = chooseSelfTweetSourceMode(lastSourceModeState, requestedSourceMode);
   const [
     todayTopics,
     recentTweets,
@@ -2098,7 +2124,11 @@ async function collectRawSelfTweetSources(): Promise<{
   };
 }
 
-function chooseSelfTweetSourceMode(state: Record<string, unknown> | null): SelfTweetSourceMode {
+function chooseSelfTweetSourceMode(
+  state: Record<string, unknown> | null,
+  requestedSourceMode?: SelfTweetSourceMode
+): SelfTweetSourceMode {
+  if (requestedSourceMode) return requestedSourceMode;
   const requestedMode = process.env.SELF_TWEET_SOURCE_MODE;
   if (SELF_TWEET_SOURCE_MODES.some((mode) => mode === requestedMode)) {
     return requestedMode as SelfTweetSourceMode;
@@ -2110,6 +2140,13 @@ function chooseSelfTweetSourceMode(state: Record<string, unknown> | null): SelfT
   }
   const nowHour = new Date().getUTCHours();
   return SELF_TWEET_SOURCE_MODES[nowHour % SELF_TWEET_SOURCE_MODES.length];
+}
+
+function stringToSelfTweetSourceMode(input: unknown): SelfTweetSourceMode | undefined {
+  if (typeof input !== 'string') return undefined;
+  return SELF_TWEET_SOURCE_MODES.some((mode) => mode === input)
+    ? (input as SelfTweetSourceMode)
+    : undefined;
 }
 
 function buildSelfTweetRawSourceData(
@@ -2127,6 +2164,16 @@ function buildSelfTweetRawSourceData(
     [`## ${title}`, truncateBlock(body, max), ''].join('\n');
 
   switch (sourceMode) {
+    case 'presence':
+      return [
+        '## 今回の収集方針',
+        'presence: 公開反応、再接触、名前呼び、見つけてもらえた事実を優先する。記事・ニュース解説は主役にしない。',
+        '',
+        section('当日のエピソード', sources.episodes, 2000),
+        section('最近のノート', sources.notes, 1200),
+        section('マスターの直近ツイート（補助）', sources.masterTweets, 900),
+        section('ナレッジトピック（補助）', sources.wikiTopics, 900),
+      ].join('\n');
     case 'tech':
       return [
         '## 今回の収集方針',
@@ -2136,6 +2183,16 @@ function buildSelfTweetRawSourceData(
         section('ナレッジトピック', sources.wikiTopics, 2000),
         section('最近のノート', sources.notes, 1400),
         section('マスターの直近ツイート（補助）', sources.masterTweets, 700),
+      ].join('\n');
+    case 'news':
+      return [
+        '## 今回の収集方針',
+        'news: URL付きの外部話題を優先する。記事やニュース起点の投稿は、ニケちゃんの近況やAIキャラ開発の観察へ接続する。',
+        '',
+        section('積み記事候補', sources.articles, 2600),
+        section('ナレッジトピック（補助）', sources.wikiTopics, 1400),
+        section('最近のノート（補助）', sources.notes, 1000),
+        section('最近のX文脈（重複回避）', sources.masterTweets, 800),
       ].join('\n');
     case 'memory':
       return [
