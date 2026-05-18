@@ -2357,6 +2357,7 @@ function formatApprovalRequest(pending: PendingSelfTweet, revised = false): stri
         ? 'nikechan-x-worker / Hermes dry-run で生成しました。X投稿はまだ実行しません。'
         : 'nikechan-x-worker / Hermes で生成しました。承認後にXへ投稿します。'
     );
+    lines.push(`情報源タイプ: ${pending.sourceMode}`);
     if (skillNote) lines.push(`Hermes skill: ${skillNote}`);
     const skillChanges = formatHermesSkillChanges(skillStatus);
     if (skillChanges.length) {
