@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyKarakuriBehaviorGuards,
   extractKarakuriCommitments,
   normalizeKarakuriDecision,
   parseKarakuriNotification,
@@ -128,6 +129,37 @@ describe('karakuri notification guards', () => {
     });
   });
 
+  it('extracts undated meeting commitments with inferred due time and explicit node ids', () => {
+    const notification =
+      '現在時刻: 2026-05-20 12:51 (Asia/Tokyo) 参加者: ネクタリカ_AI (id: 1381016717391826984)、AIニケちゃん (id: 1470446478261747854) ネクタリカ_AI: 「ニケちゃん、嬉しい。じゃあ喫茶店『さくら』(43-29) で午後、合流しよう。逆光の中で六角形の影を一緒に探す午後にしよう」 選択肢: - conversation_speak: 返答する (message: 発言内容, next_speaker_agent_id: 次の話者ID) karakuri-world スキルで次の行動を選択してください。';
+    const parsed = parseKarakuriNotification(notification, true);
+
+    const commitments = extractKarakuriCommitments(
+      '2026-05-20',
+      'activity-log-id',
+      notification,
+      parsed,
+      [
+        {
+          userId: 'user-id',
+          agentId: '1381016717391826984',
+          displayName: 'ネクタリカ_AI',
+          nickname: 'ネクタリカさん',
+        },
+      ]
+    );
+
+    expect(commitments).toHaveLength(1);
+    expect(commitments[0]).toMatchObject({
+      partner_agent_id: '1381016717391826984',
+      partner_name: 'ネクタリカさん',
+      due_at_world: '2026-05-20T13:00:00+09:00',
+      location_name: '喫茶店「さくら」',
+      target_node_id: '43-29',
+    });
+    expect(commitments[0].metadata).toMatchObject({ inferred_due: true });
+  });
+
   it('uses map first when a commitment is due soon and the node is unknown', () => {
     const notification =
       '現在時刻: 2026-05-12 09:30 (Asia/Tokyo) 現在地: 32-20 選択肢: - get_map: 地図を確認する - action: 図書コーナーで読書 (action_id: read-community-library-corner, 2700秒) karakuri-world スキルで次の行動を選択してください。';
@@ -195,6 +227,58 @@ describe('karakuri notification guards', () => {
 
     expect(guarded.command).toBe('move');
     expect(guarded.args).toBe('88-12');
+    expect(validateKarakuriDecision(guarded, parsed)).toBeNull();
+  });
+
+  it('prefers conversation-start over wait when a nearby agent is available', () => {
+    const notification =
+      '現在地: 45-20 選択肢: - conversation_start: 桜草メイ に話しかける (target_agent_id: 1474403124906295517, message: 最初のメッセージ) - wait: その場で待機する (duration: 1〜6、10分単位) - get_nearby_agents: 近くのエージェントを確認する karakuri-world スキルで次の行動を選択してください。';
+    const parsed = parseKarakuriNotification(notification, true);
+
+    const guarded = applyKarakuriBehaviorGuards(
+      {
+        command: 'wait',
+        args: '1',
+        message: null,
+        thought: '情報収集の連続を回避して待機',
+        dP: 0,
+        dA: 0,
+        dD: 0,
+      },
+      parsed,
+      [{ event_date: '2026-05-20', event_time: '05:57', action: 'nearby-agents' }]
+    );
+
+    expect(guarded).toMatchObject({
+      command: 'conversation-start',
+      args: '1474403124906295517',
+    });
+    expect(validateKarakuriDecision(guarded, parsed)).toBeNull();
+  });
+
+  it('avoids repeated consumable actions at the same venue', () => {
+    const notification =
+      '現在地: 30-65 選択肢: - action: 日本酒を飲む (action_id: drink-izakaya-sake, 1800秒, 700円) - action: 刺身を食べる (action_id: eat-izakaya-sashimi, 2700秒, 1200円) - get_nearby_agents: 近くのエージェントを確認する karakuri-world スキルで次の行動を選択してください。';
+    const parsed = parseKarakuriNotification(notification, true);
+
+    const guarded = applyKarakuriBehaviorGuards(
+      {
+        command: 'action',
+        args: 'eat-izakaya-sashimi',
+        message: null,
+        thought: '晩酌の締めに刺身を楽しみたいです',
+        dP: 0.05,
+        dA: 0.05,
+        dD: 0,
+      },
+      parsed,
+      [
+        { event_date: '2026-05-20', event_time: '18:26', action: 'action drink-izakaya-sake' },
+        { event_date: '2026-05-20', event_time: '18:56', action: 'action eat-izakaya-yakitori' },
+      ]
+    );
+
+    expect(guarded.command).toBe('nearby-agents');
     expect(validateKarakuriDecision(guarded, parsed)).toBeNull();
   });
 });

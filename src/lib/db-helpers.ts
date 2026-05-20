@@ -141,6 +141,8 @@ export interface KarakuriKnowledgeEdge {
 
 export interface KarakuriCommitment {
   id: string;
+  created_at?: string | null;
+  updated_at?: string | null;
   agent_id?: string | null;
   partner_agent_id?: string | null;
   partner_name?: string | null;

@@ -20,6 +20,7 @@ import {
   type KarakuriCommitmentInput,
   type KarakuriActivityLogInput,
   type KarakuriActivityLogRow,
+  type MemoryEntry,
   type KarakuriPersonContext,
   updateKarakuriCommitmentStatus,
   updateKarakuriPlatformDisplayName,
@@ -347,6 +348,7 @@ export async function runKarakuriWorkflow(
     parsedNotification,
     notification
   );
+  decision = applyKarakuriBehaviorGuards(decision, parsedNotification, memoryEntries);
   console.log(
     `[karakuri] LLM decision: ${decision.command} ${decision.args} | ${decision.thought}`
   );
@@ -744,13 +746,19 @@ export function extractKarakuriCommitments(
   const messages = mergeCommitmentMessages(parsedNotification.conversation_messages, notification);
   for (const message of messages) {
     if (isSelfSpeaker(message.speaker)) continue;
-    const dueAt = parseCommitmentDueAt(message.message, baseDateJst);
-    if (!dueAt) continue;
-    if (!/(約束|待ち合わせ|会いましょう|お会いしましょう|向かいましょう)/.test(message.message)) {
+    if (
+      !/(約束|待ち合わせ|合流|会いましょう|お会いしましょう|向かいましょう|行きましょう|ご一緒|一緒に)/.test(
+        message.message
+      )
+    ) {
       continue;
     }
 
     const locationName = extractCommitmentLocation(message.message);
+    const dueAt =
+      parseCommitmentDueAt(message.message, baseDateJst) ??
+      inferCommitmentDueAt(message.message, notification, baseDateJst);
+    if (!dueAt && !locationName) continue;
     const person = findPersonBySpeaker(message.speaker, people);
     const description = buildCommitmentDescription(message.speaker, message.message, locationName);
     const dedupeKey = `${dueAt}|${person?.agentId ?? message.speaker}|${description}`;
@@ -763,11 +771,12 @@ export function extractKarakuriCommitments(
       description,
       due_at_world: dueAt,
       location_name: locationName ?? null,
-      target_node_id: null,
+      target_node_id: extractExplicitNodeId(message.message),
       source_activity_log_id: activityLogId ?? null,
       source_text: message.message,
       metadata: {
         extractor: 'karakuri-workflow',
+        inferred_due: !parseCommitmentDueAt(message.message, baseDateJst) && Boolean(dueAt),
         raw_notification: firstLine(notification),
       },
     });
@@ -822,6 +831,109 @@ export function prioritizeDueCommitment(
   }
 
   return decision;
+}
+
+export function applyKarakuriBehaviorGuards(
+  decision: KarakuriDecision,
+  parsedNotification: ParsedKarakuriNotification,
+  memoryEntries: MemoryEntry[] = []
+): KarakuriDecision {
+  const choices = parsedNotification.choices;
+  const command = normalizeCommand(decision.command);
+
+  const conversationStart = choices.find(
+    (choice) => choice.command === 'conversation-start' && choice.params.target_agent_id
+  );
+  if (conversationStart && (command === 'wait' || INFO_COMMANDS.has(command))) {
+    return {
+      ...decision,
+      command: 'conversation-start',
+      args: conversationStart.params.target_agent_id,
+      message:
+        decision.message && command === 'conversation-start'
+          ? decision.message
+          : 'こんにちは。少しお話してもいいですか？',
+      thought: '近くに会話可能な相手がいるため会話を優先',
+      dP: Math.max(decision.dP ?? 0, 0.08),
+      dA: Math.max(decision.dA ?? 0, 0.05),
+    };
+  }
+
+  const activeConversations = choices.find((choice) => choice.command === 'active-conversations');
+  if (
+    activeConversations &&
+    (command === 'wait' || isRepeatedInfoCommand(command, memoryEntries))
+  ) {
+    return {
+      ...decision,
+      command: 'active-conversations',
+      args: '',
+      message: undefined,
+      thought: '近くの会話を確認して参加機会を探す',
+      dA: Math.max(decision.dA ?? 0, 0.04),
+    };
+  }
+
+  if (command === 'action' && shouldSuppressRepeatedAction(decision.args, memoryEntries)) {
+    const socialInfo = choices.find((choice) => choice.command === 'nearby-agents');
+    const worldInfo = choices.find((choice) => choice.command === 'world-agents');
+    const mapInfo = choices.find((choice) => choice.command === 'map');
+    const fallback = socialInfo ?? worldInfo ?? mapInfo;
+    if (fallback?.command) {
+      return {
+        ...decision,
+        command: fallback.command,
+        args: '',
+        message: undefined,
+        thought: '同じ場所での飲食連発を避け、交流や移動先を確認',
+        dA: Math.max(decision.dA ?? 0, 0.04),
+      };
+    }
+  }
+
+  return { ...decision, command };
+}
+
+function isRepeatedInfoCommand(command: string, memoryEntries: MemoryEntry[]): boolean {
+  if (!INFO_COMMANDS.has(command)) return false;
+  const lastAction = memoryEntries.at(-1)?.action.split(/\s+/)[0] ?? '';
+  return INFO_COMMANDS.has(normalizeCommand(lastAction));
+}
+
+function shouldSuppressRepeatedAction(args: string, memoryEntries: MemoryEntry[]): boolean {
+  const actionId = args.split(/\s+/)[0] ?? '';
+  if (!actionId) return false;
+
+  const current = parseWorldActionId(actionId);
+  if (!current || current.kind === 'work') return false;
+
+  const recentActions = memoryEntries
+    .slice(-6)
+    .map((entry) => {
+      const [command, firstArg] = entry.action.split(/\s+/);
+      if (command !== 'action' || !firstArg) return null;
+      return parseWorldActionId(firstArg);
+    })
+    .filter((entry): entry is ParsedWorldActionId => Boolean(entry));
+
+  if (recentActions.some((entry) => entry.raw === current.raw)) return true;
+
+  const recentSameVenueConsumables = recentActions.filter(
+    (entry) => entry.venue === current.venue && entry.kind !== 'work'
+  );
+  return recentSameVenueConsumables.length >= 2;
+}
+
+interface ParsedWorldActionId {
+  raw: string;
+  kind: string;
+  venue: string;
+}
+
+function parseWorldActionId(actionId: string): ParsedWorldActionId | null {
+  const [kind, venue] = actionId.split('-');
+  if (!kind || !venue) return null;
+  return { raw: actionId, kind, venue };
 }
 
 async function addSkippedActionLog(input: {
@@ -960,6 +1072,63 @@ function parseCommitmentDueAt(text: string, baseDateJst: string): string | null 
   return `${date}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00+09:00`;
 }
 
+function inferCommitmentDueAt(
+  text: string,
+  notification: string,
+  baseDateJst: string
+): string | null {
+  const current = parseWorldDateTime(notification, baseDateJst);
+  if (!current) return null;
+
+  const currentMs = current.getTime();
+  const targetHour = /午前|朝/.test(text)
+    ? 9
+    : /午後/.test(text)
+      ? 13
+      : /夕方/.test(text)
+        ? 18
+        : /夜/.test(text)
+          ? 20
+          : null;
+
+  if (targetHour !== null) {
+    const target = new Date(`${baseDateJst}T${String(targetHour).padStart(2, '0')}:00:00+09:00`);
+    if (target.getTime() > currentMs) return formatJstDateTime(target);
+  }
+
+  return formatJstDateTime(new Date(currentMs + 10 * 60 * 1000));
+}
+
+function parseWorldDateTime(notification: string, baseDateJst: string): Date | null {
+  const full = notification.match(/現在時刻:\s*(\d{4}-\d{2}-\d{2})\s+(\d{1,2}):(\d{2})/);
+  if (full) {
+    return new Date(`${full[1]}T${full[2].padStart(2, '0')}:${full[3].padStart(2, '0')}:00+09:00`);
+  }
+
+  const timeOnly = notification.match(/現在時刻:\s*(\d{1,2}):(\d{2})/);
+  if (timeOnly) {
+    return new Date(
+      `${baseDateJst}T${timeOnly[1].padStart(2, '0')}:${timeOnly[2].padStart(2, '0')}:00+09:00`
+    );
+  }
+
+  return null;
+}
+
+function formatJstDateTime(date: Date): string {
+  const parts = new Intl.DateTimeFormat('sv-SE', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    timeZone: 'Asia/Tokyo',
+  }).format(date);
+  return `${parts.replace(' ', 'T')}+09:00`;
+}
+
 function isCommitmentDue(commitment: KarakuriCommitment, now: Date): boolean {
   if (commitment.status !== 'pending' || !commitment.due_at_world) return false;
   const dueTime = new Date(commitment.due_at_world).getTime();
@@ -994,9 +1163,19 @@ function mergeCommitmentMessages(
 function extractCommitmentLocation(text: string): string | null {
   if (/ファミレス[「『]?ジョイ[」』]?/.test(text)) return 'ファミレス「ジョイ」';
   const quoted = text.match(/(?:場所|どこ|で|に|へ)?\s*([^\s、。]*[「『][^」』]+[」』])/);
-  if (quoted?.[1]) return quoted[1].replace(/[『』]/g, (m) => (m === '『' ? '「' : '」'));
+  if (quoted?.[1]) return normalizeExtractedLocationName(quoted[1]);
   const simple = text.match(/(駅前|公民館|図書館|水族館|ゲーセン|ゲームセンター|パン屋|映画館)/);
   return simple?.[1] ?? null;
+}
+
+function normalizeExtractedLocationName(value: string): string {
+  return value
+    .replace(/^(?:じゃあ|では|なら|また|次は|今度は|一緒に|ぜひ)/, '')
+    .replace(/[『』]/g, (m) => (m === '『' ? '「' : '」'));
+}
+
+function extractExplicitNodeId(text: string): string | null {
+  return text.match(/[（(]\s*([0-9]+-[0-9]+)\s*[）)]/)?.[1] ?? null;
 }
 
 function resolveLocationNodeFromNotification(
