@@ -48,6 +48,7 @@ import {
 } from './prompt-processor.js';
 import { runKarakuriWorkflow } from './workflows/karakuri.js';
 import { runElythWorkflow } from './workflows/elyth.js';
+import { buildMemoryRecallContext } from './lib/memory-recall.js';
 import {
   isHashtagReactionWorkflowPrompt,
   handleMentionReactionApproval,
@@ -813,6 +814,12 @@ async function main() {
             prompt = `以下のスキル定義に従って行動してください:\n\n${skillContent}\n\n---\n\n${prompt}`;
             console.log(`[xangi] Injecting skill "${channelSkillName}" for channel ${channelId}`);
           }
+        }
+
+        const memoryRecallContext = await buildMemoryRecallContext(workflowPrompt, { workdir });
+        if (memoryRecallContext) {
+          prompt = `${memoryRecallContext}\n\n---\n\n${prompt}`;
+          console.log(`[xangi] Injected memory recall context for channel ${channelId}`);
         }
 
         // チャンネルポリシーから deniedTools を取得
