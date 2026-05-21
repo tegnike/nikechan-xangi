@@ -4,6 +4,8 @@
 
 Claude Code / Codex / Gemini CLI をバックエンドに、Discord から利用できる AI アシスタント。
 
+> Nikechan-specific X workflow, deployment, and worker-boundary decisions are maintained in the parent `nikechan` repository: `docs/twitter-posting-flow.md` and `docs/xangi-architecture.md`. This README keeps xangi-local setup and usage notes.
+
 ## Features
 
 - 🤖 マルチバックエンド対応（Claude Code / Codex / Gemini CLI）
@@ -139,11 +141,11 @@ pm2 logs xangi     # ログ確認
 
 ### nikechan-x-worker self-tweet
 
-`NIKECHAN_X_WORKER_SELF_TWEET_ENABLED=true` の場合、xangi は Discord/scheduler/approval UI だけを担当し、`/self-tweet` の案生成と修正は `nikechan-x-worker` に委譲します。
+`NIKECHAN_X_WORKER_SELF_TWEET_ENABLED=true` の場合、xangi は Discord/scheduler/approval UI を担当し、`/self-tweet` の案生成と修正は `nikechan-x-worker` に委譲します。
 
-Discord から一回だけ情報源タイプを固定する場合は `/self-tweet news` のように指定できます。対応値は `presence`, `daily_life`, `tech`, `news`, `memory`, `random` です。指定しない場合は前回タイプから自動ローテーションします。
+Discord から一回だけ情報源タイプを固定する場合は `/self-tweet news` のように指定できます。対応値は `presence`, `daily_life`, `tech`, `news`, `memory`, `random` です。
 
-Discord で表示された案に対して、番号承認・見送り・修正指示を返信できます。修正指示は `WorkflowRequest.context.feedback` として worker に再送され、Hermes が再生成します。現段階では worker 側の X 投稿は dry-run 専用なので、承認しても xangi は実投稿しません。
+Nikechan運用上の詳細は親repoの `docs/twitter-posting-flow.md` を正本とします。
 
 ## ドキュメント
 

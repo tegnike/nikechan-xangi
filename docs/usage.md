@@ -2,6 +2,8 @@
 
 xangiの詳細な使い方ガイドです。
 
+> Nikechan固有のX投稿フロー、source mode、承認境界は親repo `nikechan/docs/twitter-posting-flow.md` を正本とします。この文書はxangiの汎用操作と最小コマンド例に絞ります。
+
 ## 目次
 
 - [基本操作](#基本操作)
@@ -159,7 +161,7 @@ AIがDiscord操作を実行するためのコマンドです。
 /self-tweet news
 ```
 
-情報源タイプを指定できるのは手動実行1回分です。対応値は `presence`, `daily_life`, `tech`, `news`, `memory`, `random`。指定しない場合は前回タイプから自動ローテーションします。worker経由の候補表示には `情報源タイプ: presence` のように実際に使われたタイプが表示されます。
+情報源タイプを指定できるのは手動実行1回分です。対応値は `presence`, `daily_life`, `tech`, `news`, `memory`, `random`。詳細な動作、修正再生成時の引き継ぎ、投稿可否、source modeごとの運用方針は親repo `nikechan/docs/twitter-posting-flow.md` を参照してください。
 
 ## 許可確認のスキップ
 

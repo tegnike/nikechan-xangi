@@ -2,6 +2,8 @@
 
 xangiのアーキテクチャと設計思想について説明します。
 
+> Nikechan固有の本番運用、X投稿、worker分離、VPS deployの正本は親repo `nikechan/docs/xangi-architecture.md` と `nikechan/docs/twitter-posting-flow.md` です。この文書はxangi単体の設計説明を主対象にします。
+
 ## 概要
 
 xangiは「AI CLI（Claude Code / Codex CLI / Gemini CLI）をチャットプラットフォームから使えるようにするラッパー」です。
