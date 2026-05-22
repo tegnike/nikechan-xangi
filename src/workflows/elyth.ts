@@ -627,24 +627,35 @@ function emptyExecutionSummary(): ElythExecutionSummary {
 }
 
 async function recordElythLocalEpisode(execution: ElythExecutionSummary): Promise<void> {
-  const actionCount =
-    execution.replies.length +
-    execution.likes.length +
-    execution.posts.length +
-    execution.follows.length;
-  if (actionCount === 0) return;
+  const meaningfulCount =
+    execution.replies.length + execution.posts.length + execution.follows.length;
+  if (meaningfulCount === 0) return;
 
   const date = new Date().toISOString().slice(0, 10);
-  const parts = [
-    `ELYTH活動を実行。返信${execution.replies.length}件`,
-    `いいね${execution.likes.length}件`,
-    `自発投稿${execution.posts.length}件`,
-    `フォロー${execution.follows.length}件`,
-  ];
-  const samplePost = execution.posts[0]?.content
-    ? `。自発投稿「${truncateBlock(execution.posts[0].content, 50)}」`
-    : '';
-  await runDbSh(['ep-add', date, `${parts.join('、')}${samplePost}`.slice(0, 150), 'elyth']).catch(
+  const details: string[] = [];
+  if (execution.posts[0]?.content) {
+    details.push(`自発投稿「${truncateBlock(execution.posts[0].content, 54)}」`);
+  }
+  if (execution.replies.length) {
+    const replies = execution.replies
+      .slice(0, 2)
+      .map(
+        (reply) =>
+          `@${reply.handle || 'unknown'}に「${truncateBlock(reply.content || '', 34)}」と返信`
+      )
+      .join('、');
+    details.push(`返信${execution.replies.length}件（${replies}）`);
+  }
+  if (execution.follows.length) {
+    const follows = execution.follows
+      .slice(0, 3)
+      .map((follow) => `@${follow.handle || 'unknown'}`)
+      .join('、');
+    details.push(`フォロー${execution.follows.length}件（${follows}）`);
+  }
+  if (execution.likes.length) details.push(`いいね${execution.likes.length}件`);
+
+  await runDbSh(['ep-add', date, `ELYTH活動: ${details.join('、')}`.slice(0, 150), 'elyth']).catch(
     (err) => console.error('[elyth] local episode record failed:', err)
   );
 }

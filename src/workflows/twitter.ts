@@ -1473,7 +1473,8 @@ async function executeMentionReactions(
   }
 
   const summary = `${items.length}件チェック: 返信${replyCount}件、引用RT${quoteCount}件、スキップ${skipCount}件`;
-  await recordTwitterLocalEpisode(`mention-reactionを実行。${summary}`);
+  const episode = buildMentionLocalEpisode(items, results, { replyCount, quoteCount });
+  if (episode) await recordTwitterLocalEpisode(episode);
   return { summary, results };
 }
 
@@ -1596,9 +1597,8 @@ async function executeHashtagReactions(
   }
 
   const summary = `${items.length}件チェック: RT${retweetCount}件、スキップ${skipCount}件`;
-  if (items.length > 0) {
-    await recordTwitterLocalEpisode(`hashtag-reactionを実行。${summary}`);
-  }
+  const episode = buildHashtagLocalEpisode(items, results);
+  if (episode) await recordTwitterLocalEpisode(episode);
   await opts.setPhase?.('text');
   await opts.sendReport(
     formatWorkflowReportForDiscord(
@@ -1668,6 +1668,60 @@ function formatHashtagReport(
     lines.push('なし');
   }
   return lines.join('\n');
+}
+
+function buildMentionLocalEpisode(
+  items: ReviewedMentionReactionItem[],
+  results: Array<{
+    item_id: string;
+    action: string;
+    reply_url?: string;
+    quote_url?: string;
+    error?: string;
+  }>,
+  counts: { replyCount: number; quoteCount: number }
+): string | undefined {
+  const resultById = new Map(results.map((result) => [result.item_id, result]));
+  const acted = items.filter((item) => {
+    const result = resultById.get(item.id);
+    return result && !result.error && result.action !== 'skip';
+  });
+  if (!acted.length) return undefined;
+
+  const highlights = acted
+    .slice(0, 3)
+    .map((item) => {
+      const result = resultById.get(item.id);
+      const action =
+        result?.action === 'reply+quote'
+          ? '返信と引用RT'
+          : result?.action === 'quote'
+            ? '引用RT'
+            : '返信';
+      return `@${item.username}の「${truncateInline(item.body, 34)}」に${action}`;
+    })
+    .join('、');
+  const omitted = acted.length > 3 ? `など${acted.length}件` : '';
+  return `mention-reaction: ${highlights}${omitted}。返信${counts.replyCount}件・引用RT${counts.quoteCount}件`;
+}
+
+function buildHashtagLocalEpisode(
+  items: HashtagReactionItem[],
+  results: Array<{ item_id: string; action: string; url?: string; error?: string; reason: string }>
+): string | undefined {
+  const resultById = new Map(results.map((result) => [result.item_id, result]));
+  const retweeted = items.filter((item) => {
+    const result = resultById.get(item.id);
+    return result && !result.error && result.action === 'retweet';
+  });
+  if (!retweeted.length) return undefined;
+
+  const highlights = retweeted
+    .slice(0, 3)
+    .map((item) => `@${item.username}の「${truncateInline(item.body, 38)}」をRT`)
+    .join('、');
+  const omitted = retweeted.length > 3 ? `など${retweeted.length}件` : '';
+  return `hashtag-reaction: ${highlights}${omitted}`;
 }
 
 async function markTweetLogsChecked(ids: string[]): Promise<void> {
