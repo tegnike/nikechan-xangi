@@ -4,7 +4,7 @@ import { processManager } from './process-manager.js';
 import type { RunOptions, RunResult, StreamCallbacks } from './agent-runner.js';
 import { mergeTexts } from './agent-runner.js';
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
-import { buildSystemPrompt } from './base-runner.js';
+import { buildSystemPrompt, withXangiRuntimeIdentity } from './base-runner.js';
 
 export interface ClaudeCodeOptions {
   model?: string;
@@ -66,7 +66,7 @@ export class ClaudeCodeRunner {
     // チャットプラットフォーム連携のシステムプロンプト + AGENTS.md
     args.push('--append-system-prompt', this.systemPrompt);
 
-    args.push(prompt);
+    args.push(withXangiRuntimeIdentity(prompt));
 
     const sessionInfo = options?.sessionId
       ? ` (session: ${options.sessionId.slice(0, 8)}...)`
@@ -181,7 +181,7 @@ export class ClaudeCodeRunner {
     // チャットプラットフォーム連携のシステムプロンプト + AGENTS.md
     args.push('--append-system-prompt', this.systemPrompt);
 
-    args.push(prompt);
+    args.push(withXangiRuntimeIdentity(prompt));
 
     const sessionInfo = options?.sessionId
       ? ` (session: ${options.sessionId.slice(0, 8)}...)`

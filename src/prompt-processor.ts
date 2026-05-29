@@ -1,5 +1,5 @@
 import type { Message } from 'discord.js';
-import type { AgentRunner } from './agent-runner.js';
+import { createAgentRunner, type AgentRunner } from './agent-runner.js';
 import type { loadConfig } from './config.js';
 import { ClaudeCodeRunner } from './claude-code.js';
 import { splitMessage } from './message-utils.js';
@@ -261,7 +261,9 @@ export async function processPrompt(
     const needsDisallowRunner = (disallowedTools?.length ?? 0) > 0;
     const runner: AgentRunner =
       needsSkipRunner || needsDisallowRunner
-        ? new ClaudeCodeRunner(config.agent.config)
+        ? config.agent.backend === 'claude-code'
+          ? new ClaudeCodeRunner(config.agent.config)
+          : createAgentRunner(config.agent.backend, config.agent.config)
         : agentRunner;
 
     if (needsSkipRunner) {

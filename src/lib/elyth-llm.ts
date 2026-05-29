@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { runCodexHelper, shouldUseCodexHelper } from './agent-cli.js';
 import { buildNikechanCorePrompt } from './nikechan-core.js';
 import {
   emptyElythPlan,
@@ -272,6 +273,12 @@ function runClaude(
   prompt: string,
   sessionId?: string
 ): Promise<{ text: string; sessionId?: string }> {
+  if (shouldUseCodexHelper()) {
+    return runCodexHelper(buildNikechanCorePrompt('xangi-world-elyth', prompt, { warn: true }), {
+      logPrefix: 'elyth',
+    });
+  }
+
   const modelArgs = process.env.AGENT_MODEL ? ['--model', process.env.AGENT_MODEL] : [];
   return runClaudeWithArgs(prompt, modelArgs, sessionId).catch((error) => {
     if (!modelArgs.length) throw error;

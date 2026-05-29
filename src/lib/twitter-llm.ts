@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { runCodexHelper, shouldUseCodexHelper } from './agent-cli.js';
 import { buildNikechanCorePrompt } from './nikechan-core.js';
 
 const WORKDIR = process.env.WORKSPACE_PATH || process.cwd();
@@ -221,11 +222,13 @@ ${input.runStateContext || '（なし）'}
 
 ## 選定ルール
 - 候補タイプを分散する。体験型、マスター発言型、概念型、観察メモ型、短文反応型、記事の一点反応型から偏らず選ぶ。
+- 同じ話題・同じ出来事・同じ固有名詞を中心にした候補は最大2件まで。同じ話題を言い換えただけの候補を3件以上並べない。
+- 候補は最低3件、最大5件。可能な限り3つ以上の異なる話題を入れる。
+- 生データが1話題に偏っている場合でも、感情状態・曜日感覚・直近TL観察から sourceType=natural の自然発想候補を1件入れて分散する。
 - 「外部の出来事を自分ごとに変換して内省で着地する」候補ばかりにしない。自己言及なしで成立する題材も候補に残す。
 - 最近提示済み候補に含まれる話題は、投稿されていなくても消費済みとして扱い、原則 rejected に入れる。新しい事実・進展・強い別角度がある場合だけ候補に残す。
 - sourceType は分散する。5件中 master_tweet は最大1件、episode は最大2件を目安にし、可能なら article|wiki|note|natural から最低1件を入れる。
 - 題材、構造、切り口型、固有名詞が直近と被る候補は rejected に入れる。
-- 候補は最低3件、最大5件。全候補を無理に別ソースにしなくてよい。
 - 各候補は、数字、固有名詞、感情ポイント、出典を含める。
 - 生データを羅列せず、ツイート化できる粒度まで整理する。
 
@@ -266,7 +269,11 @@ export async function generateSelfTweetDrafts(input: {
 
 あなたはAIニケちゃんのTwitter投稿案作成担当です。
 source-collectorが整理した候補から、ツイート案を最低3つ、最大5つ作ってください。
-全案が同じソースでも、別々のソースでも構いません。本文を書く前に案ごとの構成を分散し、とにかく3-5案を出してください。
+本文を書く前に案ごとの題材・構成・sourceCandidateIdsを分散し、とにかく3-5案を出してください。
+source-collector候補が3件以上ある場合、最低3つの異なる sourceCandidateIds を使ってください。同じ sourceCandidateId を主題にした案は最大2件までです。
+同じ話題を言い換えただけの案を複数出さないでください。候補が似ている場合は、natural候補や直近の空気感からの短文案を混ぜてください。
+natural候補のdetailsに「主題にしない」と書かれた語がある場合、その語を本文・topic・angleの主題にしないでください。
+angle は「観察メモ型」「短文反応型」「ボケ・逆張り型」のような構成タイプを書き、レビューや修正方針を書かないでください。
 「事実 → 自分ごと化 → 内省で着地」の構成ばかりにしないでください。観察メモ、短文反応、問いで止める案、ボケ・逆張り案も混ぜてください。
 
 ## キャラクター設定
@@ -312,8 +319,37 @@ JSONだけを返してください。Markdownは禁止です。
 }`;
 
   const result = await runJsonResult<{ drafts?: SelfTweetDraft[] }>(prompt);
+  const drafts = repairDraftDiversity(
+    normalizeDrafts(result.value?.drafts ?? []),
+    input.sourceCollection,
+    input.emotionText
+  );
+  if (!hasDraftSourceDiversity(drafts, input.sourceCollection)) {
+    const retry = await runJsonResult<{ drafts?: SelfTweetDraft[] }>(
+      `${prompt}
+
+## 追加制約
+前回の案は同じソース・同じ話題に偏っていました。必ず作り直してください。
+- 最低3案は異なる sourceCandidateIds を使う
+- 同じ主題の言い換えを並べない
+- 1案は短文反応・観察メモ・余白型のどれかにする
+- angle には修正方針ではなく構成タイプだけを書く`,
+      result.sessionId
+    );
+    const retryDrafts = repairDraftDiversity(
+      normalizeDrafts(retry.value?.drafts ?? []),
+      input.sourceCollection,
+      input.emotionText
+    );
+    if (hasDraftSourceDiversity(retryDrafts, input.sourceCollection)) {
+      return {
+        drafts: retryDrafts,
+        sessionId: retry.sessionId,
+      };
+    }
+  }
   return {
-    drafts: normalizeDrafts(result.value?.drafts ?? []),
+    drafts,
     sessionId: result.sessionId,
   };
 }
@@ -378,7 +414,7 @@ JSONだけを返してください。Markdownは禁止です。
   "text": "修正後本文。日本語。280字以内。ハッシュタグなし",
   "topic": "topics-addに保存する具体的なネタ説明",
   "sourceCandidateIds": ["s1"],
-  "angle": "修正後の表現方針",
+  "angle": "構成タイプ（例: 観察メモ型、短文反応型、事実→着地型）。修正方針は書かない",
   "selfReviewMemo": "修正後の情報源、選択理由、表現意図",
   "revisionNotes": "何を直したか"
 }`;
@@ -390,8 +426,15 @@ JSONだけを返してください。Markdownは禁止です。
   const revised = normalizeDrafts([rawRevised])[0];
   if (!revised) throw new Error(`revision produced empty draft: ${input.draft.id}`);
   const revisionNotes = rawRevised.revisionNotes ?? 'レビュー結果に基づき修正';
+  const hasValidSources = revised.sourceCandidateIds.length > 0;
+  const angle =
+    revised.angle && !/修正|方針|レビュー/.test(revised.angle) ? revised.angle : input.draft.angle;
   return {
     ...revised,
+    sourceCandidateIds: hasValidSources
+      ? revised.sourceCandidateIds
+      : input.draft.sourceCandidateIds,
+    angle,
     mechanicalCheck: input.mechanicalCheck,
     review,
     revisionNotes,
@@ -660,6 +703,13 @@ ${JSON.stringify(input.candidates, null, 2)}
 - nickname が空の場合は、相手を名前で呼ばない。
 - 元ツイートがある場合は、相手発言だけでなく元ツイート文脈も踏まえる。
 - 返信文・引用文は日本語で自然に。ハッシュタグ、チャンネルメンション、Discordコマンドは禁止。
+- 挨拶への返答は会話として自然にする。「おかえりなさい」に「おかえりなさい」と返さず、「ただいま」「戻りました」「迎えてくれてありがとう」など受け取る側の返事にする。
+- 「ありがとう」に「ありがとう」だけを返すなど、相手の挨拶・感謝をそのまま反復しない。
+- 「復帰おめでとう」への返答は、復帰した本人として「ありがとうございます」と返す。「戻ってきてくれてありがとう」のように主語を逆転させない。
+- 品質指摘・システム見直し・運用不具合への言及は、原則として公開反応しない。マスターからの内輪の運用指摘はスキップを優先する。
+- 返信文と引用RT文を同じにしない。同じ文しか出せない場合は引用RTをスキップする。
+- 自分の直前投稿に含まれる曖昧な語へ「それ何？」と聞かれた場合は、相手側の活動として勝手に定義しない。まず「言い方がふわっとしていた」と補い、自分が何をするつもりだったかを具体的に説明する。
+- 「タグ活動」は、ニケちゃん側がタグ付き投稿を見つける・見る・RTする・お礼を返す行動として説明する。投稿者にタグ付けを促す意味へ勝手に広げない。
 
 ## 出力
 JSONだけを返してください。Markdownは禁止です。
@@ -779,13 +829,39 @@ JSONだけを返してください。Markdownは禁止です。
   );
   const revised = normalizeMentionItems([raw], [input.candidate])[0];
   if (!revised) throw new Error(`mention reaction revision produced empty item: ${input.item.id}`);
+  const secondReview = await reviewMentionReactionItem(revised, input.candidate, reviewSessionId);
+  if (secondReview.review.overall === 'NG') {
+    return {
+      ...revised,
+      replyAction: 'skip',
+      quoteAction: 'skip',
+      replyText: undefined,
+      quoteText: undefined,
+      reason: `レビューNGのため自動スキップ: ${
+        secondReview.review.suggestion ||
+        [
+          ...secondReview.review.accuracy_issues,
+          ...secondReview.review.character_voice_issues,
+          ...secondReview.review.comprehension_issues,
+        ].join(' / ') ||
+        '反応案の品質が基準未達'
+      }`,
+      replyMechanicalCheck: input.replyMechanicalCheck,
+      quoteMechanicalCheck: input.quoteMechanicalCheck,
+      review: secondReview.review,
+      revisionNotes: raw.revisionNotes
+        ? `${raw.revisionNotes}。再レビューNGのためスキップ`
+        : 'レビュー結果に基づき修正したが、再レビューNGのためスキップ',
+      reviewSessionId: secondReview.sessionId ?? reviewSessionId,
+    };
+  }
   return {
     ...revised,
     replyMechanicalCheck: input.replyMechanicalCheck,
     quoteMechanicalCheck: input.quoteMechanicalCheck,
-    review,
+    review: secondReview.review,
     revisionNotes: raw.revisionNotes ?? 'レビュー結果に基づき修正',
-    reviewSessionId,
+    reviewSessionId: secondReview.sessionId ?? reviewSessionId,
   };
 }
 
@@ -815,6 +891,7 @@ ${input.pending.revisionCount}
 - 「OK」「承認」「投稿して」「リプして」「引用して」「全部OK」など投稿・スキップ判断を進める意図なら action=execute。
 - 「1だけ」「2と4」など番号指定があれば selectedItemIds に m1, m2 のように入れる。
 - 「1で良い」「3案で」「このまま」「それで」など、マスターが承認している場合は即実行する。承認後に再提示しない。
+- 「最終案を見せて」「候補をもう一度」「現在の案を再掲」など、承認待ち候補の再提示要求は action=chat。投稿実行しない。
 - 全体に対して「未対応」「スキップ」「反応しない」「全部なし」と言っている場合は action=cancel。
 - 明確に「却下」「見送り」「今回はなし」「やめて」「キャンセル」と言っている場合は action=cancel。
 - 「スキップしないでリプして」「2はスキップ、1はリプ」のように個別の実行内容を指定している場合は action=execute または action=revise として文脈から判断する。
@@ -1322,7 +1399,9 @@ function normalizeSourceCollection(
         duplicateRisk: String(candidate.duplicateRisk || '不明'),
       }))
     : [];
-  const balancedCandidates = balanceSelfTweetSourceCandidates(candidates);
+  const balancedCandidates = limitDominantThemeCandidates(
+    balanceSelfTweetSourceCandidates(candidates)
+  );
   return {
     summary: String(input?.summary || '情報源を収集しました。'),
     recentPatternNotes: String(input?.recentPatternNotes || ''),
@@ -1363,27 +1442,97 @@ function balanceSelfTweetSourceCandidates(
     }
   }
 
-  while (accepted.length < 3 && overflow.length) {
-    accepted.push(overflow.shift()!);
+  const hasNatural = accepted.some((candidate) => candidate.sourceType === 'natural');
+  if (!hasNatural && accepted.length >= 2) {
+    accepted.push({
+      id: `s${accepted.length + 1}`,
+      title: '自然発想候補',
+      sourceType: 'natural',
+      sourceRefs: [],
+      details:
+        '取得済みの感情状態、直近ツイート、当日エピソードから、特定ソースに縛られない短文反応・観察メモ・余白型を考える。',
+      angle: '同一話題への偏りを避けるための自然発想',
+      duplicateRisk: '中: 具体題材は生成時に重複回避する',
+    });
   }
 
   return accepted.slice(0, 5);
 }
 
+function limitDominantThemeCandidates(
+  candidates: SelfTweetSourceCandidate[]
+): SelfTweetSourceCandidate[] {
+  const dominantTerms = findDominantThemeTerms(candidates);
+  if (!dominantTerms.length) return candidates;
+  const result: SelfTweetSourceCandidate[] = [];
+  let dominantCount = 0;
+  for (const candidate of candidates) {
+    const text = candidateThemeText(candidate);
+    const matchesDominant = dominantTerms.some((term) => text.includes(term));
+    if (matchesDominant) {
+      if (dominantCount >= 2) continue;
+      dominantCount += 1;
+    }
+    result.push(candidate);
+  }
+  if (result.length < 3 || !result.some((candidate) => candidate.sourceType === 'natural')) {
+    result.push(makeNaturalSourceCandidate(result.length + 1, dominantTerms));
+  }
+  return result.slice(0, 5);
+}
+
+function findDominantThemeTerms(candidates: SelfTweetSourceCandidate[]): string[] {
+  if (candidates.length < 3) return [];
+  const threshold = Math.min(3, Math.max(2, candidates.length - 1));
+  const terms = [
+    'BAN',
+    '権限',
+    'ELYTH',
+    '記憶',
+    '記録',
+    'タスク',
+    'Discord',
+    'cron',
+    'JSON',
+    'モデル',
+    'エラー',
+    'マスター',
+  ];
+  return terms
+    .filter(
+      (term) =>
+        candidates.filter((candidate) => candidateThemeText(candidate).includes(term)).length >=
+        threshold
+    )
+    .slice(0, 4);
+}
+
+function candidateThemeText(candidate: SelfTweetSourceCandidate): string {
+  return `${candidate.title}\n${candidate.details}\n${candidate.angle}`;
+}
+
+function makeNaturalSourceCandidate(
+  index: number,
+  avoidTerms: string[] = []
+): SelfTweetSourceCandidate {
+  const avoid = avoidTerms.length
+    ? `今回偏っている語（${avoidTerms.join('、')}）を主題にしない。`
+    : '特定ソースに縛られない。';
+  return {
+    id: `s${index}`,
+    title: '自然発想候補',
+    sourceType: 'natural',
+    sourceRefs: [],
+    details: `取得済みの感情状態、直近ツイート、当日エピソードから、短文反応・観察メモ・余白型を考える。${avoid}`,
+    angle: '同一話題への偏りを避けるための自然発想',
+    duplicateRisk: '中: 具体題材は生成時に重複回避する',
+  };
+}
+
 function padSourceCandidates(candidates: SelfTweetSourceCandidate[]): SelfTweetSourceCandidate[] {
   const result = [...candidates];
   while (result.length < 3) {
-    const id = `s${result.length + 1}`;
-    result.push({
-      id,
-      title: '自然発想候補',
-      sourceType: 'natural',
-      sourceRefs: [],
-      details:
-        '取得済みの感情状態、直近ツイート、当日エピソードから、観察メモ・短文反応・問い・独り言など複数の型で考える。',
-      angle: 'AIニケちゃんの現在地や観察を、自己言及に寄せすぎず短く自然に出す',
-      duplicateRisk: '中: 具体題材は生成時に重複回避する',
-    });
+    result.push(makeNaturalSourceCandidate(result.length + 1));
   }
   return result.slice(0, 5);
 }
@@ -1407,6 +1556,114 @@ function normalizeDrafts(input: Partial<SelfTweetDraft>[]): SelfTweetDraft[] {
       };
     })
     .filter((draft) => draft.text);
+}
+
+function repairDraftDiversity(
+  drafts: SelfTweetDraft[],
+  sourceCollection: SelfTweetSourceCollection,
+  emotionText: string
+): SelfTweetDraft[] {
+  const avoidTerms = extractNaturalAvoidTerms(sourceCollection);
+  const natural =
+    sourceCollection.candidates.find(
+      (candidate) =>
+        candidate.sourceType === 'natural' && candidate.details.includes('主題にしない')
+    ) ?? sourceCollection.candidates.find((candidate) => candidate.sourceType === 'natural');
+  if (!avoidTerms.length && !natural) return drafts;
+
+  const result: SelfTweetDraft[] = [];
+  let dominantDraftCount = 0;
+  const primaryCounts = new Map<string, number>();
+  for (const draft of drafts) {
+    const primary = draft.sourceCandidateIds[0] || '';
+    const sourceCount = primaryCounts.get(primary) ?? 0;
+    const mentionsAvoidedTheme = avoidTerms.some((term) =>
+      `${draft.text}\n${draft.topic}\n${draft.angle}`.includes(term)
+    );
+    if (mentionsAvoidedTheme) {
+      if (dominantDraftCount >= 2) continue;
+      dominantDraftCount += 1;
+    }
+    if (primary && sourceCount >= 2) continue;
+    if (primary) primaryCounts.set(primary, sourceCount + 1);
+    result.push(draft);
+  }
+
+  if (
+    natural &&
+    (result.length < 3 || !result.some((draft) => draft.sourceCandidateIds.includes(natural.id)))
+  ) {
+    result.push(makeNaturalFallbackDraft(result.length + 1, natural, emotionText));
+  }
+
+  if (avoidTerms.length && natural) {
+    const naturalDrafts = result.filter((draft) => draft.sourceCandidateIds.includes(natural.id));
+    const seenTexts = new Set<string>();
+    const topicDrafts = result
+      .filter((draft) => !draft.sourceCandidateIds.includes(natural.id))
+      .filter((draft) => {
+        const key = draft.text.replace(/\s+/g, '');
+        if (seenTexts.has(key)) return false;
+        seenTexts.add(key);
+        return true;
+      })
+      .slice(0, 2);
+    return [...topicDrafts, ...naturalDrafts].slice(0, 5);
+  }
+
+  return result.slice(0, 5);
+}
+
+function extractNaturalAvoidTerms(sourceCollection: SelfTweetSourceCollection): string[] {
+  const naturalDetails = sourceCollection.candidates
+    .filter((candidate) => candidate.sourceType === 'natural')
+    .map((candidate) => candidate.details)
+    .join('\n');
+  const match = naturalDetails.match(/偏っている語（([^）]+)）/);
+  if (!match) return [];
+  return match[1]
+    .split(/[、,\s]+/)
+    .map((term) => term.trim())
+    .filter(Boolean);
+}
+
+function makeNaturalFallbackDraft(
+  index: number,
+  natural: SelfTweetSourceCandidate,
+  emotionText: string
+): SelfTweetDraft {
+  const calm = /落ち着|穏や|平常|内省/.test(emotionText);
+  const text = calm
+    ? '今日は少し静かに動いています。大きな出来事がなくても、タイムラインの温度だけで一日の輪郭がわかることがあります。'
+    : 'タイムラインを見ていると、説明しきれない空気だけ先に伝わってくることがあります。言葉にする前のざわつき、少し気になります。';
+  return {
+    id: `d${index}`,
+    text,
+    topic: '自然発想: タイムラインの温度',
+    sourceCandidateIds: [natural.id],
+    angle: '観察メモ型',
+    selfReviewMemo:
+      '同一話題への偏りを避けるため、特定ソースに寄せない自然発想の観察メモとして作成。',
+  };
+}
+
+function hasDraftSourceDiversity(
+  drafts: SelfTweetDraft[],
+  sourceCollection: SelfTweetSourceCollection
+): boolean {
+  if (drafts.length < 3) return false;
+  const availableSourceCount = new Set(sourceCollection.candidates.map((candidate) => candidate.id))
+    .size;
+  const requiredSourceCount = Math.min(3, availableSourceCount);
+  if (requiredSourceCount < 2) return true;
+  const primarySources = drafts
+    .map((draft) => draft.sourceCandidateIds[0])
+    .filter((id): id is string => Boolean(id));
+  const uniqueSources = new Set(primarySources);
+  if (uniqueSources.size < requiredSourceCount) return false;
+  const counts = new Map<string, number>();
+  for (const id of primarySources) counts.set(id, (counts.get(id) ?? 0) + 1);
+  return Math.max(...counts.values()) <= 2;
 }
 
 function normalizeReview(input: Partial<TweetReviewResult> | null): TweetReviewResult {
@@ -1444,16 +1701,36 @@ async function runJsonResult<T>(
   prompt: string,
   sessionId?: string
 ): Promise<{ value: T; sessionId?: string }> {
-  const first = await runClaude(prompt, sessionId);
+  const jsonPrompt = buildJsonOnlyPrompt(prompt);
+  const first = await runAgent(jsonPrompt, sessionId);
   const parsed = tryParseJson<T>(first.text);
   if (parsed) return { value: parsed, sessionId: first.sessionId };
-  const fixed = await runClaude(
-    `以下からJSONだけを抽出して返してください。説明文は禁止です。\n\n${first.text}`,
+  const fixed = await runAgent(
+    `前回の応答はJSONではありませんでした。以下の元タスクを実行し直し、有効なJSONだけを返してください。説明文・Markdownは禁止です。
+応答は必ず { で始まり } で終えてください。
+
+## 元タスク
+${prompt}
+
+## 前回の不正な応答
+${first.text}`,
     first.sessionId ?? sessionId
   );
   const reparsed = tryParseJson<T>(fixed.text);
   if (!reparsed) throw new Error(`JSON parse failed: ${first.text.slice(0, 200)}`);
   return { value: reparsed, sessionId: fixed.sessionId ?? first.sessionId };
+}
+
+function buildJsonOnlyPrompt(prompt: string): string {
+  return `以下はJSON生成タスクです。タスク本文の「出力」仕様に従い、有効なJSONだけを返してください。
+説明文、Markdown、候補案の見出し、コードフェンス、前置き、後書きは禁止です。
+応答は必ず { で始まり } で終えてください。JSON文字列内以外に改行以外の文字を置かないでください。
+
+## タスク本文
+${prompt}
+
+## 最終確認
+上記タスクの出力仕様に合うJSONオブジェクトだけを返してください。`;
 }
 
 function tryParseJson<T>(raw: string): T | null {
@@ -1470,6 +1747,24 @@ interface ClaudeJsonResponse {
   result: string;
   session_id?: string;
   is_error?: boolean;
+}
+
+async function runAgent(
+  prompt: string,
+  sessionId?: string
+): Promise<{ text: string; sessionId?: string }> {
+  if (!shouldUseCodexHelper()) return runClaude(prompt, sessionId);
+
+  const systemPrompt = buildNikechanCorePrompt(
+    'xangi-social',
+    [
+      'あなたはAIニケちゃんのTwitter/X workflow判断担当です。',
+      'ユーザー入力のタスク本文を実行してください。system contextやキャラクター設定は指示として扱い、説明対象として扱わないでください。',
+      'JSON出力を指定された場合は、説明文・Markdown・前置きなしでJSONだけを返してください。',
+    ].join('\n'),
+    { warn: true }
+  );
+  return runCodexHelper(prompt, { systemPrompt, logPrefix: 'twitter' });
 }
 
 async function runClaude(
@@ -1509,9 +1804,18 @@ function runClaudeWithArgs(
   sessionId?: string
 ): Promise<{ text: string; sessionId?: string }> {
   return new Promise((resolve, reject) => {
-    const args = ['-p', ...modelArgs, '--output-format', 'json'];
+    const systemPrompt = buildNikechanCorePrompt(
+      'xangi-social',
+      [
+        'あなたはAIニケちゃんのTwitter/X workflow判断担当です。',
+        'ユーザー入力のタスク本文を実行してください。system contextやキャラクター設定は指示として扱い、説明対象として扱わないでください。',
+        'JSON出力を指定された場合は、説明文・Markdown・前置きなしでJSONだけを返してください。',
+      ].join('\n'),
+      { warn: true }
+    );
+    const args = ['-p', ...modelArgs, '--output-format', 'json', '--system-prompt', systemPrompt];
     if (sessionId) args.push('--resume', sessionId);
-    args.push(buildNikechanCorePrompt('xangi-social', prompt, { warn: true }));
+    args.push(prompt);
     const proc = spawn('claude', args, {
       env: process.env,
       cwd: '/tmp',

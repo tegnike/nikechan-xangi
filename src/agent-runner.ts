@@ -111,7 +111,7 @@ export function getBackendDisplayName(backend: AgentBackend): string {
     case 'gemini':
       return 'Gemini';
     case 'opencode':
-      return 'OpenCode (Qwen)';
+      return 'OpenCode';
     default:
       return backend;
   }

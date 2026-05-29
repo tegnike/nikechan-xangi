@@ -4,7 +4,7 @@ import { EventEmitter } from 'events';
 import type { RunOptions, RunResult, StreamCallbacks, AgentRunner } from './agent-runner.js';
 import { mergeTexts } from './agent-runner.js';
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
-import { buildPersistentSystemPrompt } from './base-runner.js';
+import { buildPersistentSystemPrompt, withXangiRuntimeIdentity } from './base-runner.js';
 import { notifyError } from './error-notify.js';
 
 /**
@@ -449,7 +449,7 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     this.fullText = '';
 
     // session_idが取得済みならプロンプトに注入（episode-recorder等で使用）
-    let prompt = this.currentItem.prompt;
+    let prompt = withXangiRuntimeIdentity(this.currentItem.prompt);
     if (this.sessionId) {
       prompt = `SessionStart:session_id=${this.sessionId}\n\n${prompt}`;
     }

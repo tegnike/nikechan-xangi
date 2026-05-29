@@ -513,7 +513,10 @@ async function main() {
       try {
         const sessionId = getSession(channelId);
 
-        const skipRunner = new ClaudeCodeRunner(config.agent.config);
+        const skipRunner =
+          config.agent.backend === 'claude-code'
+            ? new ClaudeCodeRunner(config.agent.config)
+            : createAgentRunner(config.agent.backend, config.agent.config);
         const runResult = await skipRunner.run(skipMessage, {
           skipPermissions: true,
           sessionId,
@@ -1074,8 +1077,10 @@ async function main() {
         // チャンネルポリシーから deniedTools を取得し、必要ならワンショットランナーを使用
         const scheduleDeniedTools = channelPolicies[channelId]?.deniedTools ?? [];
         const scheduleRunner =
-          scheduleDeniedTools.length > 0 ? new ClaudeCodeRunner(config.agent.config) : agentRunner;
-        if (scheduleDeniedTools.length > 0) {
+          scheduleDeniedTools.length > 0 && config.agent.backend === 'claude-code'
+            ? new ClaudeCodeRunner(config.agent.config)
+            : agentRunner;
+        if (scheduleDeniedTools.length > 0 && config.agent.backend === 'claude-code') {
           console.log(
             `[scheduler] Using one-shot runner for channel ${channelId} (denied: ${scheduleDeniedTools.join(', ')})`
           );

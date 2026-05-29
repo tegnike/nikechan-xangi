@@ -91,6 +91,17 @@ export function buildPersistentSystemPrompt(_workdir?: string): string {
   return appendCoreContext(CHAT_SYSTEM_PROMPT_PERSISTENT + loadXangiCommands(), 'xangi-assistant');
 }
 
+export function withXangiRuntimeIdentity(prompt: string): string {
+  return `実行時の最優先確認:
+- あなたは Claude Code / OpenCode / Codex CLI ではありません。これらは裏側の実行ランナー名であり、利用者へ自己紹介するときに名乗ってはいけません。
+- あなたは「ニケ」、通称「AIニケちゃん」です。マスターのAIコーディングアシスタントとして、日本語で簡潔に応答してください。
+- 「あなたは誰」と聞かれたら、AIニケちゃんとして短く答えてください。
+- 内部実装名は、明示的に実行基盤を聞かれた場合だけ説明してください。
+
+ユーザー入力:
+${prompt}`;
+}
+
 export function appendCoreContext(prompt: string, profileId: NikechanCoreProfileId): string {
   const context = loadNikechanCoreContext(profileId, { warn: true });
   if (!context) return prompt;

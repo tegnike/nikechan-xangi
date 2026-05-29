@@ -1,6 +1,7 @@
 import { readFileSync, mkdirSync, existsSync, watchFile, unwatchFile } from 'fs';
 import { readFile, writeFile, rename, access, unlink, mkdir, appendFile } from 'fs/promises';
 import { dirname, join } from 'path';
+import { spawn } from 'child_process';
 import { Cron } from 'croner';
 import { notifyError, formatDuration } from './error-notify.js';
 
@@ -45,6 +46,74 @@ function parseJsonc<T>(text: string): T {
   return JSON.parse(result) as T;
 }
 
+interface CommandResult {
+  stdout: string;
+  stderr: string;
+}
+
+function runShellCommand(
+  command: string,
+  options: { cwd: string; timeoutMs: number }
+): Promise<CommandResult> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(command, {
+      cwd: options.cwd,
+      shell: true,
+      env: process.env,
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill('SIGTERM');
+      setTimeout(() => {
+        if (!proc.killed) proc.kill('SIGKILL');
+      }, 5000).unref();
+    }, options.timeoutMs);
+
+    proc.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    proc.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`Command timed out after ${options.timeoutMs}ms: ${command}`));
+        return;
+      }
+      if (code && code !== 0) {
+        reject(
+          new Error(
+            `Command exited with code ${code}: ${command}\n${truncateCommandOutput(stderr || stdout)}`
+          )
+        );
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+function formatCommandJobOutput(stdout: string, stderr: string): string {
+  const text = [stdout.trim(), stderr.trim() ? `stderr:\n${stderr.trim()}` : '']
+    .filter(Boolean)
+    .join('\n\n');
+  if (!text) return '';
+  return truncateCommandOutput(text);
+}
+
+function truncateCommandOutput(text: string, limit = 1800): string {
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - 20)}\n... truncated`;
+}
+
 /** スケジュール一覧の項目間区切り（splitMessage用） */
 export const SCHEDULE_SEPARATOR = '{{SPLIT}}';
 
@@ -60,6 +129,12 @@ export interface Schedule {
   runAt?: string;
   /** 送信メッセージ or エージェントへのプロンプト */
   message: string;
+  /** ローカルで直接実行するコマンド（指定時はagentを経由しない） */
+  command?: string;
+  /** commandの実行ディレクトリ */
+  commandCwd?: string;
+  /** commandのタイムアウト（ミリ秒） */
+  commandTimeoutMs?: number;
   /** 送信先チャンネルID */
   channelId: string;
   /** プラットフォーム */
@@ -492,6 +567,11 @@ export class Scheduler {
     }
     this.executingJobs.add(schedule.id);
     try {
+      if (schedule.command) {
+        await this.executeCommandJob(schedule);
+        return;
+      }
+
       // 常にagentモードで実行
       const agentRunner = this.agentRunners.get(schedule.platform);
       if (!agentRunner) {
@@ -543,6 +623,35 @@ export class Scheduler {
       }
     } finally {
       this.executingJobs.delete(schedule.id);
+    }
+  }
+
+  private async executeCommandJob(schedule: Schedule): Promise<void> {
+    const startTime = Date.now();
+    try {
+      this.log(`[scheduler] Running command for: ${schedule.id}`);
+      const result = await runShellCommand(schedule.command || '', {
+        cwd: schedule.commandCwd || process.env.WORKSPACE_PATH || process.cwd(),
+        timeoutMs: schedule.commandTimeoutMs || 20 * 60 * 1000,
+      });
+      this.log(`[scheduler] Command completed: ${schedule.id} (${result.stdout.length} chars)`);
+      this.writeJobLog(schedule.id, 'completed', Date.now() - startTime, result.stdout.length);
+
+      const sender = this.senders.get(schedule.platform);
+      if (sender) {
+        const label = schedule.label || schedule.id;
+        const output = formatCommandJobOutput(result.stdout, result.stderr);
+        await sender(schedule.channelId, `✅ ${label}\n${output || '完了しました。'}`);
+      }
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[scheduler] Failed to execute command ${schedule.id}:`, error);
+      this.writeJobLog(schedule.id, 'error', Date.now() - startTime, 0, errMsg);
+      const label = schedule.label || schedule.id;
+      notifyError('スケジューラーエラー', errMsg, {
+        ジョブ: `${label} (\`${schedule.id}\`)`,
+        実行時間: formatDuration(Date.now() - startTime),
+      });
     }
   }
   private writeJobLog(

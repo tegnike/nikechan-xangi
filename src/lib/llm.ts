@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { runCodexHelper, shouldUseCodexHelper } from './agent-cli.js';
 import { buildNikechanCorePrompt } from './nikechan-core.js';
 
 const WORKDIR = process.env.WORKSPACE_PATH || process.cwd();
@@ -205,10 +206,44 @@ function tryParseDecision(raw: string): KarakuriDecision | null {
   };
 }
 
-function runClaude(prompt: string): Promise<string> {
+async function runClaude(prompt: string): Promise<string> {
+  if (shouldUseCodexHelper()) {
+    const result = await runCodexHelper(
+      buildNikechanCorePrompt('xangi-world-karakuri', prompt, { warn: true }),
+      {
+        logPrefix: 'karakuri',
+      }
+    );
+    return result.text;
+  }
+
+  const modelArgs = process.env.AGENT_MODEL ? ['--model', process.env.AGENT_MODEL] : [];
+  const attempts =
+    modelArgs.length > 0
+      ? [
+          { label: `AGENT_MODEL=${process.env.AGENT_MODEL}`, args: modelArgs },
+          { label: 'default model', args: [] },
+        ]
+      : [{ label: 'default model', args: [] }];
+
+  let lastError: unknown;
+  for (let i = 0; i < attempts.length; i += 1) {
+    const attempt = attempts[i];
+    try {
+      return await runClaudeWithArgs(prompt, attempt.args);
+    } catch (error) {
+      lastError = error;
+      console.warn(`[karakuri] claude attempt failed (${attempt.label}): ${formatError(error)}`);
+      if (i < attempts.length - 1) await delay(800 * (i + 1));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function runClaudeWithArgs(prompt: string, modelArgs: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     // プロンプトをstdinで渡す（引数だと長い文字列・特殊文字の問題を避ける）
-    const modelArgs = process.env.AGENT_MODEL ? ['--model', process.env.AGENT_MODEL] : [];
     const proc = spawn('claude', ['-p', ...modelArgs, '--output-format', 'text'], {
       env: process.env,
       // WORKDIRを使うとCLAUDE.md/スキルが読み込まれてJSONではなく説明文が返るため
@@ -226,12 +261,25 @@ function runClaude(prompt: string): Promise<string> {
       stderr += d.toString();
     });
     proc.on('close', (code: number) => {
-      if (code !== 0) reject(new Error(`claude failed (${code}): ${stderr.trim()}`));
-      else resolve(stdout.trim());
+      if (code !== 0) {
+        reject(new Error(`claude failed (${code}): ${formatClaudeFailure(stderr, stdout)}`));
+      } else resolve(stdout.trim());
     });
     proc.on('error', reject);
 
     proc.stdin.write(buildNikechanCorePrompt('xangi-world-karakuri', prompt, { warn: true }));
     proc.stdin.end();
   });
+}
+
+function formatClaudeFailure(stderr: string, stdout: string): string {
+  return stderr.trim() || stdout.trim().slice(0, 500) || 'no stderr/stdout';
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

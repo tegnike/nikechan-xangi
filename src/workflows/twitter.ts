@@ -107,6 +107,10 @@ interface PendingSelfTweet {
   drafts: ReviewedSelfTweetDraft[];
 }
 
+interface WorkflowReplyContext {
+  candidates: Array<{ number: number; text: string }>;
+}
+
 interface PendingMentionReaction {
   kind: 'mention-reaction';
   channelId: string;
@@ -286,11 +290,17 @@ export async function handleSelfTweetApproval(
   }
   const runKey = `twitter:self-tweet:${channelId}`;
 
-  const normalized = prompt.trim();
+  const normalized = extractWorkflowReplyText(prompt);
   if (!normalized || normalized.startsWith('/')) return false;
 
   if (pending.origin === 'nikechan-x-worker') {
-    await handleWorkerSelfTweetApproval(normalized, pending, opts, runKey);
+    await handleWorkerSelfTweetApproval(
+      normalized,
+      pending,
+      opts,
+      runKey,
+      parseWorkflowReplyContext(prompt)
+    );
     return true;
   }
 
@@ -603,8 +613,22 @@ export async function handleMentionReactionApproval(
   }
   const runKey = `twitter:mention-reaction:${channelId}`;
 
-  const normalized = prompt.trim();
+  const normalized = extractWorkflowReplyText(prompt);
   if (!normalized || normalized.startsWith('/')) return false;
+
+  if (isMentionApprovalPreviewRequest(normalized)) {
+    await addTwitterActivityLog({
+      ...activityMeta(opts, runKey),
+      workflow: 'mention-reaction',
+      stage: 'chat',
+      raw_content: normalized,
+      parsed: { response: 're-present approval request', items: pending.items },
+    });
+    await savePendingMentionReaction(channelId, pending);
+    await opts.setPhase?.('text');
+    await opts.sendReport(formatMentionApprovalRequest(pending, true));
+    return true;
+  }
 
   await opts.setPhase?.('thinking');
   const decision = await interpretMasterMentionReactionReply({
@@ -878,7 +902,7 @@ async function createPendingMentionReaction(
 ): Promise<PendingMentionReaction | null> {
   const [emotion, candidates] = await Promise.all([
     getEmotion(),
-    collectMentionReactionCandidates(),
+    collectMentionReactionCandidatesWithRetry(),
   ]);
   if (!candidates.length) return null;
   const emotionText = formatEmotion(emotion);
@@ -898,6 +922,19 @@ async function createPendingMentionReaction(
     items: reviewedItems,
     checkedTweetLogIds: candidates.map((candidate) => candidate.tweetLogId),
   };
+}
+
+async function collectMentionReactionCandidatesWithRetry(): Promise<MentionReactionCandidate[]> {
+  let candidates = await collectMentionReactionCandidates();
+  if (candidates.length) return candidates;
+
+  const retryDelaysMs = [10_000, 20_000];
+  for (const delayMs of retryDelaysMs) {
+    await delay(delayMs);
+    candidates = await collectMentionReactionCandidates();
+    if (candidates.length) return candidates;
+  }
+  return candidates;
 }
 
 async function collectMentionReactionCandidates(): Promise<MentionReactionCandidate[]> {
@@ -939,6 +976,10 @@ async function collectMentionReactionCandidates(): Promise<MentionReactionCandid
     })
   );
   return candidates.filter((candidate) => candidate.tweetLogId && candidate.postId);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function collectHashtagReactionCandidates(): Promise<HashtagReactionCandidate[]> {
@@ -1160,7 +1201,7 @@ async function prepareMentionItems(
           entry.candidate
         )
       );
-    return Promise.all(
+    const finalChecked = await Promise.all(
       guarded.map(async (item) => ({
         ...item,
         replyMechanicalCheck:
@@ -1172,6 +1213,12 @@ async function prepareMentionItems(
             ? await runMechanicalChecks(item.quoteText)
             : undefined,
       }))
+    );
+    return finalChecked.map((item) =>
+      enforceMentionActionGuardrails(
+        item,
+        candidateByLogId.get(item.tweetLogId) ?? candidateById.get(item.id)
+      )
     );
   }
   const reviewed = await Promise.all(
@@ -1208,7 +1255,12 @@ async function prepareMentionItems(
           : undefined,
     }))
   );
-  return finalChecked;
+  return finalChecked.map((item) =>
+    enforceMentionActionGuardrails(
+      item,
+      candidateByLogId.get(item.tweetLogId) ?? candidateById.get(item.id)
+    )
+  );
 }
 
 function enforceMentionNicknameGuardrail<T extends MentionReactionItem>(
@@ -1216,8 +1268,8 @@ function enforceMentionNicknameGuardrail<T extends MentionReactionItem>(
   candidate?: MentionReactionCandidate
 ): T {
   if (!candidate) return item;
-  const replyText = guardMentionText(item.replyText, candidate);
-  const quoteText = guardMentionText(item.quoteText, candidate);
+  const replyText = guardGreetingEcho(guardMentionText(item.replyText, candidate), candidate);
+  const quoteText = guardGreetingEcho(guardMentionText(item.quoteText, candidate), candidate);
   if (replyText === item.replyText && quoteText === item.quoteText) return item;
   return {
     ...item,
@@ -1254,6 +1306,104 @@ function guardMentionText(
     );
   }
   return sanitizeTweetText(guarded.replace(/\s{2,}/g, ' '));
+}
+
+function guardGreetingEcho(
+  text: string | undefined,
+  candidate: MentionReactionCandidate
+): string | undefined {
+  if (!text) return text;
+  if (/おかえり|お帰り/u.test(candidate.body) && /おかえり|お帰り/u.test(text)) {
+    return sanitizeTweetText(
+      'ただいま戻りました。迎えてくれてありがとうございます。今日からまた少しずつ動いていきます。'
+    );
+  }
+  if (/ありがとう|ありがと/u.test(candidate.body) && /^(ありがとう|ありがと)/u.test(text.trim())) {
+    return sanitizeTweetText(
+      text.replace(/^ありがとう(?:ございます)?[！!。、\s]*/u, 'こちらこそ、')
+    );
+  }
+  return text;
+}
+
+function enforceMentionActionGuardrails<T extends ReviewedMentionReactionItem>(
+  item: T,
+  candidate?: MentionReactionCandidate
+): T {
+  if (!candidate) return item;
+  let next: T = { ...item };
+  const body = candidate.body;
+
+  if (/クオリティ.{0,8}低|品質.{0,8}低|システム見直|運用不具合/u.test(body)) {
+    next = {
+      ...next,
+      replyAction: 'skip',
+      quoteAction: 'skip',
+      replyText: undefined,
+      quoteText: undefined,
+      replyMechanicalCheck: undefined,
+      quoteMechanicalCheck: undefined,
+      reason:
+        '品質指摘・システム見直しの話題なので、ニケちゃん本人が公開反応すると内輪の運用不具合を広げるだけになるためスキップ。',
+      revisionNotes: appendRevisionNote(
+        next.revisionNotes,
+        '運用品質への指摘は公開反応せずスキップ'
+      ),
+    };
+  }
+
+  if (
+    next.replyAction === 'reply' &&
+    next.replyText &&
+    /復帰.{0,8}おめでとう|復帰おめ/u.test(body) &&
+    /戻ってきてくれてありがとう/u.test(next.replyText)
+  ) {
+    const prefix = candidate.nickname ? `${candidate.nickname}、` : '';
+    const replyText = `${prefix}ありがとうございます。反応しにくい投稿も、見るところを探しながら少しずつ返していきますね。`;
+    next = {
+      ...next,
+      replyText,
+      replyMechanicalCheck: syncMechanicalCheckText(next.replyMechanicalCheck, replyText),
+      reason: appendRevisionNote(next.reason, '復帰祝いへの返答として主語を修正'),
+      revisionNotes: appendRevisionNote(next.revisionNotes, '復帰祝いへの返答で主語逆転を補正'),
+    };
+  }
+
+  if (
+    next.replyAction === 'reply' &&
+    next.quoteAction === 'quote' &&
+    next.replyText &&
+    next.quoteText &&
+    normalizeComparableTweetText(next.replyText) === normalizeComparableTweetText(next.quoteText)
+  ) {
+    next = {
+      ...next,
+      quoteAction: 'skip',
+      quoteText: undefined,
+      quoteMechanicalCheck: undefined,
+      reason: appendRevisionNote(next.reason, '返信と引用RTが同文のため引用RTをスキップ'),
+      revisionNotes: appendRevisionNote(next.revisionNotes, '同文の引用RTを取り下げ'),
+    };
+  }
+
+  return next;
+}
+
+function syncMechanicalCheckText(
+  check: ReviewedMentionReactionItem['replyMechanicalCheck'],
+  text: string
+): ReviewedMentionReactionItem['replyMechanicalCheck'] {
+  return check ? { ...check, checkedText: text } : { ok: true, checkedText: text, issues: [] };
+}
+
+function normalizeComparableTweetText(text: string): string {
+  return text.replace(/\s+/gu, '').trim();
+}
+
+function appendRevisionNote(base: string | undefined, addition: string): string {
+  if (!base) return addition;
+  if (base.includes(addition)) return base;
+  return `${base}。${addition}`;
 }
 
 function okTweetReview() {
@@ -1308,26 +1458,116 @@ function stringFromUnknown(value: unknown): string | undefined {
 function interpretWorkerSelfTweetReply(
   message: string,
   pending: PendingSelfTweet
-): { action: 'post' | 'revise' | 'cancel'; selectedDraftId?: string; instruction: string } {
-  const selectedDraftId = extractDraftSelection(message, pending);
+): {
+  action: 'post' | 'revise' | 'cancel';
+  selectedDraftId?: string;
+  selectedDraftIds?: string[];
+  instruction: string;
+} {
+  const selectedDraftIds = extractDraftSelections(message, pending);
+  const selectedDraftId = selectedDraftIds[0];
   if (/(見送り|キャンセル|やめ|やめて|不要|cancel|skip)/iu.test(message)) {
-    return { action: 'cancel', selectedDraftId, instruction: message };
+    return { action: 'cancel', selectedDraftId, selectedDraftIds, instruction: message };
   }
   if (/^(ok|OK|おk|承認|投稿|投稿して|これで|それで|そのまま|go|yes)$/iu.test(message.trim())) {
-    return { action: 'post', selectedDraftId, instruction: message };
+    return { action: 'post', selectedDraftId, selectedDraftIds, instruction: message };
   }
-  if (selectedDraftId && /^(案)?\s*\d+\s*(で|を|にする|投稿|ok|OK)?$/iu.test(message.trim())) {
-    return { action: 'post', selectedDraftId, instruction: message };
+  if (selectedDraftIds.length && isWorkerPostApprovalMessage(message)) {
+    return { action: 'post', selectedDraftId, selectedDraftIds, instruction: message };
   }
-  return { action: 'revise', selectedDraftId, instruction: message };
+  return { action: 'revise', selectedDraftId, selectedDraftIds, instruction: message };
 }
 
-function extractDraftSelection(message: string, pending: PendingSelfTweet): string | undefined {
+function extractDraftSelections(message: string, pending: PendingSelfTweet): string[] {
   const draftId = pending.drafts.find((draft) => message.includes(draft.id))?.id;
-  if (draftId) return draftId;
-  const match = message.match(/(?:案|候補)?\s*([1-5])/u);
-  if (!match) return undefined;
-  return pending.drafts[Number(match[1]) - 1]?.id;
+  const selected = new Set<string>();
+  if (draftId) selected.add(draftId);
+  for (const match of message.matchAll(/(?:案|候補)?\s*([1-5])/gu)) {
+    const draft = pending.drafts[Number(match[1]) - 1];
+    if (draft) selected.add(draft.id);
+  }
+  return [...selected];
+}
+
+function isWorkerPostApprovalMessage(message: string): boolean {
+  const normalized = message.trim();
+  if (
+    /(修正|直し|直して|変えて|変更|もっと|微妙|違う|足して|消して|削って|短く|長く)/u.test(
+      normalized
+    )
+  ) {
+    return false;
+  }
+  if (/(投稿|ツイート|tweet|post|承認|ok|OK|これで|それで|そのまま|go|yes)/iu.test(normalized)) {
+    return true;
+  }
+  return /^(?:案|候補)?\s*[1-5](?:\s*(?:,|、|と|and|&|\+|・|\s)\s*(?:案|候補)?\s*[1-5])*\s*(?:で|を|にする)?$/iu.test(
+    normalized
+  );
+}
+
+function extractWorkflowReplyText(prompt: string): string {
+  const normalized = prompt.trim();
+  if (!normalized.startsWith('---\n💬 返信元')) return normalized;
+  const separator = '\n---\n';
+  const index = normalized.lastIndexOf(separator);
+  if (index < 0) return normalized;
+  return normalized.slice(index + separator.length).trim();
+}
+
+function parseWorkflowReplyContext(prompt: string): WorkflowReplyContext | undefined {
+  const normalized = prompt.trim();
+  if (!normalized.startsWith('---\n💬 返信元')) return undefined;
+  const separator = '\n---\n';
+  const index = normalized.lastIndexOf(separator);
+  if (index < 0) return undefined;
+  const quoted = normalized.slice(0, index);
+  const candidates = [...quoted.matchAll(/(?:^|\n)\s*([1-5])\.\s*「([^\n]+?)」/gu)].map(
+    (match) => ({
+      number: Number(match[1]),
+      text: sanitizeTweetText(match[2] ?? ''),
+    })
+  );
+  const valid = candidates.filter((candidate) => candidate.number && candidate.text);
+  return valid.length ? { candidates: valid } : undefined;
+}
+
+function extractDraftSelectionNumbers(message: string): number[] {
+  const selected = new Set<number>();
+  for (const match of message.matchAll(/(?:案|候補)?\s*([1-5])/gu)) {
+    selected.add(Number(match[1]));
+  }
+  return [...selected];
+}
+
+async function selectReplyContextDrafts(
+  message: string,
+  replyContext?: WorkflowReplyContext
+): Promise<ReviewedSelfTweetDraft[]> {
+  if (!replyContext?.candidates.length) return [];
+  const numbers = extractDraftSelectionNumbers(message);
+  if (!numbers.length) return [];
+  const candidates = numbers
+    .map((number) => replyContext.candidates.find((candidate) => candidate.number === number))
+    .filter((candidate): candidate is { number: number; text: string } => Boolean(candidate));
+  if (!candidates.length) return [];
+  return Promise.all(
+    candidates.map(
+      async (candidate): Promise<ReviewedSelfTweetDraft> => ({
+        id: `r${candidate.number}`,
+        text: candidate.text,
+        topic: `reply-selected self-tweet ${candidate.number}`,
+        sourceCandidateIds: [],
+        angle: 'Discord reply-selected candidate',
+        selfReviewMemo: 'Selected from the replied approval message.',
+        mechanicalCheck: await runMechanicalChecks(candidate.text, {
+          topic: `reply-selected self-tweet ${candidate.number}`,
+        }),
+        review: okTweetReview(),
+        revisionNotes: 'Discord reply-selected candidate',
+      })
+    )
+  );
 }
 
 async function revisePendingMentionFromMaster(
@@ -1368,6 +1608,18 @@ function selectMentionItems(
   return selected.length ? selected : pending.items;
 }
 
+function isMentionApprovalPreviewRequest(message: string): boolean {
+  return (
+    /(最終|現在|いま|今|最新).{0,12}(案|候補).{0,12}(もう一度|再掲|見せ|ちょうだい|ください|出して|表示)/u.test(
+      message
+    ) || /(案|候補).{0,12}(もう一度|再掲|見せ|ちょうだい|ください|出して|表示)/u.test(message)
+  );
+}
+
+async function checkedMentionPostText(text: string): Promise<string> {
+  return (await runMechanicalChecks(text)).checkedText || text;
+}
+
 async function executeMentionReactions(
   items: ReviewedMentionReactionItem[],
   pending: PendingMentionReaction
@@ -1406,16 +1658,14 @@ async function executeMentionReactions(
     };
     try {
       if (item.replyAction === 'reply' && item.replyText) {
+        const replyText = await checkedMentionPostText(item.replyText);
         if (isTwitterWorkflowDryRun()) {
-          result.reply_url = `dry-run reply: ${item.replyText}`;
+          result.reply_url = `dry-run reply: ${replyText}`;
         } else {
-          await assertPublicEgressAllowed(
-            'x',
-            item.replyMechanicalCheck?.checkedText || item.replyText
-          );
+          await assertPublicEgressAllowed('x', replyText);
           result.reply_url = await runTwitterPost([
             'reply',
-            item.replyMechanicalCheck?.checkedText || item.replyText,
+            replyText,
             item.postId,
             'mention-reaction',
           ]);
@@ -1424,16 +1674,14 @@ async function executeMentionReactions(
         replyCount += 1;
       }
       if (item.quoteAction === 'quote' && item.quoteText) {
+        const quoteText = await checkedMentionPostText(item.quoteText);
         if (isTwitterWorkflowDryRun()) {
-          result.quote_url = `dry-run quote: ${item.quoteText}`;
+          result.quote_url = `dry-run quote: ${quoteText}`;
         } else {
-          await assertPublicEgressAllowed(
-            'x',
-            item.quoteMechanicalCheck?.checkedText || item.quoteText
-          );
+          await assertPublicEgressAllowed('x', quoteText);
           result.quote_url = await runTwitterPost([
             'quote',
-            item.quoteMechanicalCheck?.checkedText || item.quoteText,
+            quoteText,
             item.postId,
             'mention-reaction',
           ]);
@@ -1818,7 +2066,9 @@ async function createPendingSelfTweetFromWorker(
   const sourceCollection = workerReportToSourceCollection(report);
   const drafts = await Promise.all(
     report.actions
-      .filter((action) => action.type === 'post_tweet' && action.preview)
+      .filter(
+        (action) => action.type === 'post_tweet' && action.preview && action.status === 'proposed'
+      )
       .slice(0, 5)
       .map(async (action, index): Promise<ReviewedSelfTweetDraft> => {
         const text = sanitizeTweetText(String(action.preview));
@@ -1937,7 +2187,8 @@ async function handleWorkerSelfTweetApproval(
   normalized: string,
   pending: PendingSelfTweet,
   opts: TwitterWorkflowOptions,
-  runKey: string
+  runKey: string,
+  replyContext?: WorkflowReplyContext
 ): Promise<void> {
   const decision = interpretWorkerSelfTweetReply(normalized, pending);
   await addTwitterActivityLog({
@@ -1961,37 +2212,60 @@ async function handleWorkerSelfTweetApproval(
   }
 
   if (decision.action === 'post') {
-    const draft = selectDraft(pending, decision.selectedDraftId);
+    const replyDrafts = await selectReplyContextDrafts(normalized, replyContext);
+    const selectedDrafts = replyDrafts.length
+      ? replyDrafts
+      : selectDrafts(pending, decision.selectedDraftIds);
+    const blockedDrafts = selectedDrafts.filter(
+      (draft) => !isPostableSelfTweetDraft(pending, draft)
+    );
+    const drafts = selectedDrafts.filter((draft) => isPostableSelfTweetDraft(pending, draft));
+    if (!drafts.length) {
+      await opts.setPhase?.('text');
+      await opts.sendReport(
+        '選択された案は安全ガードでブロック済みのため、投稿しませんでした。別の番号を選ぶか、修正指示をください。'
+      );
+      return;
+    }
     await opts.setPhase?.('tool_use');
-    const postResult = await publishSelectedSelfTweet(draft, opts);
+    const postResults: string[] = [];
+    for (const draft of blockedDrafts) {
+      postResults.push(
+        `案${draftLabel(pending, draft.id)}: skipped（worker safety guard blocked）`
+      );
+    }
+    for (const draft of drafts) {
+      const postResult = await publishSelectedSelfTweet(draft, opts);
+      postResults.push(`案${draftLabel(pending, draft.id)}: ${postResult}`);
+      if (!isTwitterWorkflowDryRun()) {
+        await recordTwitterLocalEpisode(
+          `self-tweetで案${draftLabel(pending, draft.id)}を投稿。ネタ: ${truncateInline(draft.topic, 80)}。本文「${truncateInline(draft.text, 80)}」`
+        );
+      }
+    }
     const dryRun = isTwitterWorkflowDryRun();
     await addTwitterActivityLog({
       ...activityMeta(opts, runKey),
       workflow: 'self-tweet',
       stage: 'execute',
-      raw_content: draft.text,
+      raw_content: drafts.map((draft) => draft.text).join('\n---\n'),
       parsed: {
         action: 'tweet',
         dry_run: dryRun,
-        selected_draft_id: draft.id,
-        topic: draft.topic,
-        result: postResult,
+        selected_draft_ids: drafts.map((draft) => draft.id),
+        topics: drafts.map((draft) => draft.topic),
+        results: postResults,
         worker_report: pending.workerReport,
       },
     });
-    if (!dryRun) {
-      await recordTwitterLocalEpisode(
-        `self-tweetで案${draftLabel(pending, draft.id)}を投稿。ネタ: ${truncateInline(draft.topic, 80)}。本文「${truncateInline(draft.text, 80)}」`
-      );
-    }
     await clearPendingSelfTweet(pending.channelId, 'executed');
     await setTwitterRunState('self_tweet_last_execute', {
       at: new Date().toISOString(),
-      selected_draft_id: draft.id,
-      topic: draft.topic,
+      selected_draft_ids: drafts.map((draft) => draft.id),
+      topics: drafts.map((draft) => draft.topic),
       worker: 'nikechan-x-worker',
       dry_run: dryRun,
-      result: postResult,
+      results: postResults,
     });
     await opts.setPhase?.('text');
     await opts.sendReport(
@@ -2003,14 +2277,21 @@ async function handleWorkerSelfTweetApproval(
             ? 'nikechan-x-worker self tweet approved in dry-run'
             : 'nikechan-x-worker self tweet posted',
           runKey,
-          actions: [
-            { type: 'tweet', label: `tweet ${draft.id}`, status: dryRun ? 'dry-run' : 'success' },
-          ],
+          actions: drafts.map((draft) => ({
+            type: 'tweet',
+            label: `tweet ${draft.id}`,
+            status: dryRun ? 'dry-run' : 'success',
+          })),
           nextAction: dryRun ? 'review dry-run result before live posting' : undefined,
         }),
         dryRun
-          ? `承認として受け取りました。dry-run設定のため、X投稿は実行していません。\n\n予定本文:\n「${draft.mechanicalCheck.checkedText || draft.text}」`
-          : `投稿まで完了しました。\n${postResult || '（投稿結果のURL取得なし）'}`
+          ? `承認として受け取りました。dry-run設定のため、X投稿は実行していません。\n\n予定本文:\n${drafts
+              .map(
+                (draft) =>
+                  `案${draftLabel(pending, draft.id)}: 「${draft.mechanicalCheck.checkedText || draft.text}」`
+              )
+              .join('\n')}`
+          : `投稿まで完了しました。\n${postResults.join('\n') || '（投稿結果のURL取得なし）'}`
       )
     );
     return;
@@ -2376,6 +2657,28 @@ function selectDraft(pending: PendingSelfTweet, selectedDraftId?: string): Revie
   return pending.drafts[0];
 }
 
+function selectDrafts(
+  pending: PendingSelfTweet,
+  selectedDraftIds?: string[]
+): ReviewedSelfTweetDraft[] {
+  if (!selectedDraftIds?.length) return [selectDraft(pending)];
+  const selected = selectedDraftIds.map((id) => selectDraft(pending, id));
+  return [...new Map(selected.map((draft) => [draft.id, draft])).values()];
+}
+
+function isPostableSelfTweetDraft(
+  pending: PendingSelfTweet,
+  draft: ReviewedSelfTweetDraft
+): boolean {
+  if (pending.origin !== 'nikechan-x-worker') return true;
+  const index = pending.drafts.findIndex((candidate) => candidate.id === draft.id);
+  const postActions =
+    pending.workerReport?.actions.filter((entry) => entry.type === 'post_tweet') ?? [];
+  if (postActions.length !== pending.drafts.length) return true;
+  const action = postActions[index];
+  return action?.status !== 'blocked';
+}
+
 function xWorkerSelfTweetMode(): XWorkerWorkflowRequest['mode'] {
   const control = resolveWorkflowControl('x', process.env.TWITTER_WORKFLOW_DRY_RUN === 'true');
   switch (control.releaseMode) {
@@ -2443,7 +2746,7 @@ function formatApprovalRequest(pending: PendingSelfTweet, revised = false): stri
     if (sourceTitles || draft.angle) {
       lines.push(`   元ソース: ${sourceTitles || '自然発想'} / 切り口: ${draft.angle || '未指定'}`);
     }
-    if (draft.revisionNotes) lines.push(`   修正: ${draft.revisionNotes}`);
+    if (revised && draft.revisionNotes) lines.push(`   修正: ${draft.revisionNotes}`);
     lines.push('');
   });
   lines.push('投稿する番号、修正指示、または見送りを返信してください。');
