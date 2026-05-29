@@ -2567,7 +2567,7 @@ async function runMechanicalChecks(
   context: { topic?: string; todayTopics?: string; recentTweets?: string } = {}
 ): Promise<MechanicalCheckResult> {
   const issues: string[] = [];
-  let checkedText = text;
+  const checkedText = text;
   if (FORBIDDEN_TEXT_PATTERNS.some((pattern) => pattern.test(text))) {
     issues.push('Discordコマンド文字列またはチャンネルメンションを含む');
   }
@@ -2582,15 +2582,6 @@ async function runMechanicalChecks(
   }
   if (hasTopicOverlap(text, context.topic, context.todayTopics)) {
     issues.push('今日/直近の使用済みtopicsと題材または切り口が重なる可能性');
-  }
-  try {
-    const filtered = await runTwitterPost(['check-text', text]);
-    if (filtered && filtered !== text) {
-      checkedText = filtered;
-      issues.push('中国語フィルターで本文が自動補正された');
-    }
-  } catch (err) {
-    issues.push(`中国語チェック失敗: ${err instanceof Error ? err.message : String(err)}`);
   }
   return {
     ok: issues.length === 0,

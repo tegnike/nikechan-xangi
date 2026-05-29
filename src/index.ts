@@ -247,7 +247,7 @@ async function runDirectWorkflow(
   if (isElythWorkflowPrompt(prompt)) {
     if (areWorldWorkflowsDisabled()) {
       await context.sendReport(
-        'ELYTH workflow is disabled in xangi. Use nikechan-x Another World runtime.'
+        'ELYTH workflow is disabled in xangi. Use nikechan-hermes Another World runtime.'
       );
       return true;
     }
@@ -809,7 +809,7 @@ async function main() {
         if (channelSkillName === 'karakuri-world') {
           if (areWorldWorkflowsDisabled()) {
             await message.reply(
-              'karakuri workflow is disabled in xangi. Use nikechan-x Another World runtime.'
+              'karakuri workflow is disabled in xangi. Use nikechan-hermes Another World runtime.'
             );
             return;
           }
