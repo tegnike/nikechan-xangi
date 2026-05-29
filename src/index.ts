@@ -71,6 +71,10 @@ function isElythWorkflowPrompt(prompt: string): boolean {
   return /^\/elyth-activity(?:\s|（|\(|$)/.test(prompt.trim());
 }
 
+function areWorldWorkflowsDisabled(): boolean {
+  return process.env.XANGI_WORLD_WORKFLOWS_DISABLED === 'true';
+}
+
 function buildDiscordReportSender(
   client: Client,
   message: Message,
@@ -241,6 +245,12 @@ async function runDirectWorkflow(
   }
 
   if (isElythWorkflowPrompt(prompt)) {
+    if (areWorldWorkflowsDisabled()) {
+      await context.sendReport(
+        'ELYTH workflow is disabled in xangi. Use nikechan-x Another World runtime.'
+      );
+      return true;
+    }
     await runElythWorkflow({
       messageId: context.messageId,
       channelId: context.channelId,
@@ -797,6 +807,12 @@ async function main() {
 
         // karakuri-worldチャンネルはワークフローで処理（LLMセッションを使わない）
         if (channelSkillName === 'karakuri-world') {
+          if (areWorldWorkflowsDisabled()) {
+            await message.reply(
+              'karakuri workflow is disabled in xangi. Use nikechan-x Another World runtime.'
+            );
+            return;
+          }
           await runKarakuriWorkflow(prompt, {
             messageId: message.id,
             channelId: message.channel.id,
