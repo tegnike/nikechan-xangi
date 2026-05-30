@@ -3,6 +3,7 @@ import { processManager } from './process-manager.js';
 import type { AgentRunner, RunOptions, RunResult, StreamCallbacks } from './agent-runner.js';
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
 import { buildSystemPrompt } from './base-runner.js';
+import { cleanEnv } from './env-utils.js';
 
 export interface CodexOptions {
   model?: string;
@@ -132,7 +133,7 @@ export class CodexRunner implements AgentRunner {
       : ' (new)';
     console.log(`[codex] Executing in ${this.workdir || 'default dir'}${sessionInfo}`);
 
-    const { stdout, sessionId } = await this.execute(args, options?.channelId);
+    const { stdout, sessionId } = await this.execute(args, options?.channelId, options?.extraEnv);
     const result = this.extractResult(stdout);
 
     return { result, sessionId };
@@ -140,12 +141,14 @@ export class CodexRunner implements AgentRunner {
 
   private execute(
     args: string[],
-    channelId?: string
+    channelId?: string,
+    extraEnv?: Record<string, string>
   ): Promise<{ stdout: string; sessionId: string }> {
     return new Promise((resolve, reject) => {
       const proc = spawn('codex', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
+        env: cleanEnv(extraEnv),
       });
       this.currentProcess = proc;
 
@@ -242,18 +245,20 @@ export class CodexRunner implements AgentRunner {
       : ' (new)';
     console.log(`[codex] Streaming in ${this.workdir || 'default dir'}${sessionInfo}`);
 
-    return this.executeStream(args, callbacks, options?.channelId);
+    return this.executeStream(args, callbacks, options?.channelId, options?.extraEnv);
   }
 
   private executeStream(
     args: string[],
     callbacks: StreamCallbacks,
-    channelId?: string
+    channelId?: string,
+    extraEnv?: Record<string, string>
   ): Promise<RunResult> {
     return new Promise((resolve, reject) => {
       const proc = spawn('codex', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workdir,
+        env: cleanEnv(extraEnv),
       });
       this.currentProcess = proc;
 

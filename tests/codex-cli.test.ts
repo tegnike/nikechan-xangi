@@ -50,7 +50,11 @@ describe('CodexRunner buildArgs', () => {
   /**
    * spawn に渡された引数を取得するヘルパー
    */
-  async function getSpawnArgs(runner: CodexRunner, prompt: string, options?: { sessionId?: string; skipPermissions?: boolean }) {
+  async function getSpawnArgs(
+    runner: CodexRunner,
+    prompt: string,
+    options?: { sessionId?: string; skipPermissions?: boolean; extraEnv?: Record<string, string> }
+  ) {
     const { spawn, getMockProcess } = await import('child_process');
 
     // run を開始（完了は待たない）
@@ -64,6 +68,7 @@ describe('CodexRunner buildArgs', () => {
     const callArgs = spawnMock.mock.calls[0];
     const command = callArgs[0] as string;
     const args = callArgs[1] as string[];
+    const spawnOptions = callArgs[2] as { cwd?: string; env?: Record<string, string> };
 
     // プロセスを終了させてクリーンアップ
     const mockProcess = (getMockProcess as () => any)();
@@ -72,7 +77,7 @@ describe('CodexRunner buildArgs', () => {
     // run の結果を待つ（エラーは無視）
     await runPromise.catch(() => {});
 
-    return { command, args };
+    return { command, args, spawnOptions };
   }
 
   it('should include basic args', async () => {
@@ -183,5 +188,19 @@ describe('CodexRunner buildArgs', () => {
     expect(modelIndex).toBeLessThan(cdIndex);
     expect(cdIndex).toBeLessThan(resumeIndex);
     expect(resumeIndex).toBeLessThan(args.length - 1); // prompt is last
+  });
+
+  it('should pass extraEnv to the Codex child process', async () => {
+    const runner = new CodexRunner({});
+    const { spawnOptions } = await getSpawnArgs(runner, 'hello', {
+      extraEnv: {
+        XANGI_CONVERSATION_KEY: 'discord:channel-123',
+        XANGI_SCHEDULE_ID: 'sch_conv_summary',
+      },
+    });
+
+    expect(spawnOptions.env?.XANGI_CONVERSATION_KEY).toBe('discord:channel-123');
+    expect(spawnOptions.env?.XANGI_SCHEDULE_ID).toBe('sch_conv_summary');
+    expect(spawnOptions.env?.XANGI_SESSION).toBe('1');
   });
 });
