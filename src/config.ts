@@ -27,6 +27,8 @@ export interface Config {
     token: string;
     allowedUsers?: string[];
     autoReplyChannels?: string[];
+    /** autoReplyChannels に含まれる親チャンネルでも、配下スレッドは無視する親チャンネルID */
+    ignoredAutoReplyParentChannels?: string[];
     streaming?: boolean;
     showThinking?: boolean;
     /** チャンネルレポート転送設定: source channel ID -> report channel ID */
@@ -120,6 +122,10 @@ export function loadConfig(): Config {
       allowedUsers: discordAllowedUsers,
       autoReplyChannels:
         process.env.AUTO_REPLY_CHANNELS?.split(',')
+          .map((s) => s.trim())
+          .filter(Boolean) || [],
+      ignoredAutoReplyParentChannels:
+        process.env.AUTO_REPLY_IGNORE_PARENT_CHANNELS?.split(',')
           .map((s) => s.trim())
           .filter(Boolean) || [],
       streaming: process.env.DISCORD_STREAMING !== 'false',

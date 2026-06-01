@@ -24,6 +24,7 @@ describe('config', () => {
   it('should load Discord config when DISCORD_TOKEN is set', async () => {
     process.env.DISCORD_TOKEN = 'test-discord-token';
     process.env.DISCORD_ALLOWED_USER = '123456789';
+    process.env.AUTO_REPLY_IGNORE_PARENT_CHANNELS = '111, 222';
 
     const { loadConfig } = await import('../src/config.js');
     const config = loadConfig();
@@ -31,6 +32,7 @@ describe('config', () => {
     expect(config.discord.enabled).toBe(true);
     expect(config.discord.token).toBe('test-discord-token');
     expect(config.discord.allowedUsers).toContain('123456789');
+    expect(config.discord.ignoredAutoReplyParentChannels).toEqual(['111', '222']);
   });
 
   it('should default to claude-code backend', async () => {
