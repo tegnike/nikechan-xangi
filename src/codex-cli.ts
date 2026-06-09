@@ -1,6 +1,12 @@
 import { spawn, ChildProcess } from 'child_process';
 import { processManager } from './process-manager.js';
-import type { AgentRunner, RunOptions, RunResult, StreamCallbacks } from './agent-runner.js';
+import {
+  mergeTexts,
+  type AgentRunner,
+  type RunOptions,
+  type RunResult,
+  type StreamCallbacks,
+} from './agent-runner.js';
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
 import { buildSystemPrompt } from './base-runner.js';
 import { cleanEnv } from './env-utils.js';
@@ -287,7 +293,7 @@ export class CodexRunner implements AgentRunner {
             // テキスト抽出
             const extracted = this.extractText(json);
             if (extracted) {
-              fullText = extracted.text;
+              fullText = mergeTexts(fullText, extracted.text);
               callbacks.onText?.(extracted.text, fullText);
             }
 
@@ -327,7 +333,7 @@ export class CodexRunner implements AgentRunner {
             if (sid) sessionId = sid;
             const extracted = this.extractText(json);
             if (extracted) {
-              fullText = extracted.text;
+              fullText = mergeTexts(fullText, extracted.text);
             }
           } catch {
             // JSONパースエラーは無視
