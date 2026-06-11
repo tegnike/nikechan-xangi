@@ -21,6 +21,19 @@ export interface AgentConfig {
   sessionInitPrompt?: string;
 }
 
+const DEFAULT_IGNORED_AUTO_REPLY_PARENT_CHANNELS = ['1477766217673478234'];
+
+function parseCsvEnv(value: string | undefined): string[] {
+  return (value ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
 export interface Config {
   discord: {
     enabled: boolean;
@@ -120,14 +133,11 @@ export function loadConfig(): Config {
       enabled: !!discordToken,
       token: discordToken || '',
       allowedUsers: discordAllowedUsers,
-      autoReplyChannels:
-        process.env.AUTO_REPLY_CHANNELS?.split(',')
-          .map((s) => s.trim())
-          .filter(Boolean) || [],
-      ignoredAutoReplyParentChannels:
-        process.env.AUTO_REPLY_IGNORE_PARENT_CHANNELS?.split(',')
-          .map((s) => s.trim())
-          .filter(Boolean) || [],
+      autoReplyChannels: parseCsvEnv(process.env.AUTO_REPLY_CHANNELS),
+      ignoredAutoReplyParentChannels: uniqueStrings([
+        ...parseCsvEnv(process.env.AUTO_REPLY_IGNORE_PARENT_CHANNELS),
+        ...DEFAULT_IGNORED_AUTO_REPLY_PARENT_CHANNELS,
+      ]),
       streaming: process.env.DISCORD_STREAMING !== 'false',
       showThinking: process.env.DISCORD_SHOW_THINKING !== 'false',
       channelReports: process.env.CHANNEL_REPORTS
