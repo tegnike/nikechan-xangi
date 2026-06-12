@@ -66,6 +66,7 @@ import {
   executeScheduleFromResponse,
 } from './schedule-handler.js';
 import { buildNikechanCorePrompt } from './lib/nikechan-core.js';
+import { isXApprovalThread, parseChannelIdCsv } from './discord-filters.js';
 
 function isElythWorkflowPrompt(prompt: string): boolean {
   return /^\/elyth-activity(?:\s|（|\(|$)/.test(prompt.trim());
@@ -670,6 +671,23 @@ async function main() {
     const isMentioned = message.mentions.has(client.user!);
     const isDM = !message.guild;
     const parentId = 'parentId' in message.channel ? message.channel.parentId : null;
+    const channelName = 'name' in message.channel ? message.channel.name : null;
+    if (
+      isXApprovalThread(
+        {
+          channelType: message.channel.type,
+          parentId,
+          name: channelName,
+        },
+        parseChannelIdCsv(process.env.XANGI_X_APPROVAL_PARENT_CHANNELS)
+      )
+    ) {
+      console.log(
+        `[xangi:debug] Skip X approval thread: msgId=${message.id}, channelId=${message.channel.id}, parentId=${parentId}, name=${channelName || ''}`
+      );
+      return;
+    }
+
     const isAutoReplyChannel =
       (config.discord.autoReplyChannels?.includes(message.channel.id) ||
         (parentId && config.discord.autoReplyChannels?.includes(parentId))) ??
