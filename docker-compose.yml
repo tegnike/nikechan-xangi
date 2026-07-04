@@ -34,6 +34,9 @@ x-common: &common
     # Agent
     - AGENT_BACKEND=${AGENT_BACKEND:-codex}
     - AGENT_MODEL=${AGENT_MODEL:-gpt-5.5}
+    # Do not expose direct LLM API keys to the agent container.
+    - OPENAI_API_KEY=
+    - CODEX_ACCESS_TOKEN=
     # Disable legacy external provider passthrough even when .env.xangi still contains old keys.
     - CROF_API_KEY=
     - CROF_BASE_URL=
