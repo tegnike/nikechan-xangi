@@ -8,6 +8,8 @@ x-common: &common
     - claude-data:/home/node/.claude
     # Codex CLI 認証情報（コンテナ専用ボリューム）
     - codex-data:/home/node/.codex
+    # Grok Build CLI 認証情報・キャッシュ
+    - grok-data:/home/node/.grok
     # ワークスペース（nikechanリポジトリ全体）
     - ${WORKSPACE_PATH:-..}:/workspace
     # ローカル専用スキル（l-*）を空ボリュームで隠す
@@ -68,3 +70,5 @@ volumes:
     name: xangi_claude-data
   codex-data:
     name: xangi_codex-data
+  grok-data:
+    name: xangi_grok-data
