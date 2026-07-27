@@ -101,6 +101,10 @@ function runShellCommand(
   });
 }
 
+export function shouldSuppressCommandJobOutput(stdout: string, stderr: string): boolean {
+  return stderr.trim() === '' && stdout.trim() === '[SILENT]';
+}
+
 function formatCommandJobOutput(stdout: string, stderr: string): string {
   const text = [stdout.trim(), stderr.trim() ? `stderr:\n${stderr.trim()}` : '']
     .filter(Boolean)
@@ -636,6 +640,11 @@ export class Scheduler {
       });
       this.log(`[scheduler] Command completed: ${schedule.id} (${result.stdout.length} chars)`);
       this.writeJobLog(schedule.id, 'completed', Date.now() - startTime, result.stdout.length);
+
+      if (shouldSuppressCommandJobOutput(result.stdout, result.stderr)) {
+        this.log(`[scheduler] Command output suppressed by [SILENT]: ${schedule.id}`);
+        return;
+      }
 
       const sender = this.senders.get(schedule.platform);
       if (sender) {

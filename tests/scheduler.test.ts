@@ -1,8 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { Scheduler, parseScheduleInput, formatScheduleList } from '../src/scheduler.js';
+import { Scheduler, parseScheduleInput, formatScheduleList, shouldSuppressCommandJobOutput } from '../src/scheduler.js';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+
+describe('shouldSuppressCommandJobOutput', () => {
+  it('suppresses an exact silent sentinel with no stderr', () => {
+    expect(shouldSuppressCommandJobOutput('  [SILENT]\n', '')).toBe(true);
+  });
+
+  it('does not suppress meaningful output or stderr', () => {
+    expect(shouldSuppressCommandJobOutput('[SILENT] extra', '')).toBe(false);
+    expect(shouldSuppressCommandJobOutput('[SILENT]', 'warning')).toBe(false);
+  });
+});
 
 describe('parseScheduleInput', () => {
   beforeEach(() => {
