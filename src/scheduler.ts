@@ -101,10 +101,6 @@ function runShellCommand(
   });
 }
 
-export function shouldSuppressCommandJobOutput(stdout: string, stderr: string): boolean {
-  return stderr.trim() === '' && stdout.trim() === '[SILENT]';
-}
-
 function formatCommandJobOutput(stdout: string, stderr: string): string {
   const text = [stdout.trim(), stderr.trim() ? `stderr:\n${stderr.trim()}` : '']
     .filter(Boolean)
@@ -139,6 +135,8 @@ export interface Schedule {
   commandCwd?: string;
   /** commandのタイムアウト（ミリ秒） */
   commandTimeoutMs?: number;
+  /** command成功時の結果メッセージを送るか（既定true） */
+  notifyOnSuccess?: boolean;
   /** 送信先チャンネルID */
   channelId: string;
   /** プラットフォーム */
@@ -641,13 +639,8 @@ export class Scheduler {
       this.log(`[scheduler] Command completed: ${schedule.id} (${result.stdout.length} chars)`);
       this.writeJobLog(schedule.id, 'completed', Date.now() - startTime, result.stdout.length);
 
-      if (shouldSuppressCommandJobOutput(result.stdout, result.stderr)) {
-        this.log(`[scheduler] Command output suppressed by [SILENT]: ${schedule.id}`);
-        return;
-      }
-
       const sender = this.senders.get(schedule.platform);
-      if (sender) {
+      if (sender && schedule.notifyOnSuccess !== false) {
         const label = schedule.label || schedule.id;
         const output = formatCommandJobOutput(result.stdout, result.stderr);
         await sender(schedule.channelId, `✅ ${label}\n${output || '完了しました。'}`);

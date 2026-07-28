@@ -1,19 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { Scheduler, parseScheduleInput, formatScheduleList, shouldSuppressCommandJobOutput } from '../src/scheduler.js';
+import { Scheduler, parseScheduleInput, formatScheduleList } from '../src/scheduler.js';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-
-describe('shouldSuppressCommandJobOutput', () => {
-  it('suppresses an exact silent sentinel with no stderr', () => {
-    expect(shouldSuppressCommandJobOutput('  [SILENT]\n', '')).toBe(true);
-  });
-
-  it('does not suppress meaningful output or stderr', () => {
-    expect(shouldSuppressCommandJobOutput('[SILENT] extra', '')).toBe(false);
-    expect(shouldSuppressCommandJobOutput('[SILENT]', 'warning')).toBe(false);
-  });
-});
 
 describe('parseScheduleInput', () => {
   beforeEach(() => {
@@ -393,6 +382,27 @@ describe('Scheduler', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(executed).toContain('ch1:startup task');
+  });
+
+  it('should suppress success messages for silent command jobs', async () => {
+    const sent: string[] = [];
+    scheduler.registerSender('discord', async (_channelId, message) => {
+      sent.push(message);
+    });
+    scheduler.add({
+      type: 'startup',
+      message: 'silent command',
+      command: 'node -e "console.log(\'done\')"',
+      commandCwd: tmpDir,
+      notifyOnSuccess: false,
+      channelId: 'ch1',
+      platform: 'discord',
+    });
+
+    scheduler.startAll();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(sent).toEqual([]);
   });
 });
 
