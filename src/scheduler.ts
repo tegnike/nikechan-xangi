@@ -135,6 +135,8 @@ export interface Schedule {
   commandCwd?: string;
   /** commandのタイムアウト（ミリ秒） */
   commandTimeoutMs?: number;
+  /** command成功時の結果メッセージを送るか（既定true） */
+  notifyOnSuccess?: boolean;
   /** 送信先チャンネルID */
   channelId: string;
   /** プラットフォーム */
@@ -638,7 +640,7 @@ export class Scheduler {
       this.writeJobLog(schedule.id, 'completed', Date.now() - startTime, result.stdout.length);
 
       const sender = this.senders.get(schedule.platform);
-      if (sender) {
+      if (sender && schedule.notifyOnSuccess !== false) {
         const label = schedule.label || schedule.id;
         const output = formatCommandJobOutput(result.stdout, result.stderr);
         await sender(schedule.channelId, `✅ ${label}\n${output || '完了しました。'}`);

@@ -383,6 +383,27 @@ describe('Scheduler', () => {
 
     expect(executed).toContain('ch1:startup task');
   });
+
+  it('should suppress success messages for silent command jobs', async () => {
+    const sent: string[] = [];
+    scheduler.registerSender('discord', async (_channelId, message) => {
+      sent.push(message);
+    });
+    scheduler.add({
+      type: 'startup',
+      message: 'silent command',
+      command: 'node -e "console.log(\'done\')"',
+      commandCwd: tmpDir,
+      notifyOnSuccess: false,
+      channelId: 'ch1',
+      platform: 'discord',
+    });
+
+    scheduler.startAll();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(sent).toEqual([]);
+  });
 });
 
 describe('formatScheduleList', () => {
