@@ -35,7 +35,7 @@ x-common: &common
     - SKIP_PERMISSIONS=${SKIP_PERMISSIONS:-false}
     # Agent
     - AGENT_BACKEND=${AGENT_BACKEND:-codex}
-    - AGENT_MODEL=${AGENT_MODEL:-gpt-5.5}
+    - AGENT_MODEL=${AGENT_MODEL:-gpt-6.1-sol}
     # Do not expose direct LLM API keys to the agent container.
     - OPENAI_API_KEY=
     - CODEX_ACCESS_TOKEN=

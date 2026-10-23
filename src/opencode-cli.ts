@@ -47,7 +47,7 @@ export class OpenCodeRunner implements AgentRunner {
   private currentProcess: ChildProcess | null = null;
 
   constructor(options?: BaseRunnerOptions) {
-    this.model = options?.model || 'gpt-5.5';
+    this.model = options?.model || 'gpt-6.1-sol';
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.workdir = options?.workdir;
     this.command = resolveOpenCodeCommand();
