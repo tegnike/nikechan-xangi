@@ -30,7 +30,7 @@ import { existsSync, readFileSync } from 'fs';
 import { initErrorNotify, notifyError } from './error-notify.js';
 
 // Extracted modules
-import { splitMessage, chunkDiscordMessage, annotateChannelMentions } from './message-utils.js';
+import { splitMessage, annotateChannelMentions } from './message-utils.js';
 import {
   fetchDiscordLinkContent,
   fetchReplyContent,
@@ -46,225 +46,18 @@ import {
   getDisplayChunks,
   handleSettingsFromResponse,
 } from './prompt-processor.js';
-import { runKarakuriWorkflow } from './workflows/karakuri.js';
-import { runElythWorkflow } from './workflows/elyth.js';
 import { buildMemoryRecallContext } from './lib/memory-recall.js';
-import {
-  isHashtagReactionWorkflowPrompt,
-  handleMentionReactionApproval,
-  handleSelfTweetApproval,
-  isMentionReactionWorkflowPrompt,
-  isSelfTweetWorkflowPrompt,
-  parseSelfTweetSourceMode,
-  runHashtagReactionWorkflow,
-  runMentionReactionWorkflow,
-  runSelfTweetWorkflow,
-} from './workflows/twitter.js';
 import {
   handleScheduleCommand,
   handleScheduleMessage,
   executeScheduleFromResponse,
 } from './schedule-handler.js';
 import { buildNikechanCorePrompt } from './lib/nikechan-core.js';
-
-function isElythWorkflowPrompt(prompt: string): boolean {
-  return /^\/elyth-activity(?:\s|（|\(|$)/.test(prompt.trim());
-}
-
-function areWorldWorkflowsDisabled(): boolean {
-  return process.env.XANGI_WORLD_WORKFLOWS_DISABLED === 'true';
-}
-
-function buildDiscordReportSender(
-  client: Client,
-  message: Message,
-  reportChannelId?: string
-): (text: string) => Promise<{
-  messageId?: string;
-  channelId?: string;
-  authorId?: string;
-  authorName?: string;
-  createdAt?: string;
-}> {
-  return async (text: string) => {
-    if (!message.channel || !('send' in message.channel)) return {};
-    const chunks = chunkDiscordMessage(text, DISCORD_SAFE_LENGTH);
-    let firstSent: Message | undefined;
-    const primaryChannel = message.channel as { send: (c: string) => Promise<Message> };
-    for (const chunk of chunks) {
-      const sent = await primaryChannel.send(chunk);
-      firstSent ??= sent;
-    }
-    if (reportChannelId) {
-      const ch = await client.channels.fetch(reportChannelId).catch(() => null);
-      if (ch && 'send' in ch) {
-        const reportChannel = ch as { send: (c: string) => Promise<unknown> };
-        for (const chunk of chunks) {
-          await reportChannel.send(chunk);
-        }
-      }
-    }
-    return firstSent ? sentMessageReport(firstSent) : {};
-  };
-}
-
-type WorkflowPhase = 'thinking' | 'tool_use' | 'text';
-
-interface WorkflowSentReport {
-  messageId?: string;
-  channelId?: string;
-  authorId?: string;
-  authorName?: string;
-  createdAt?: string;
-}
-
-interface DirectWorkflowContext {
-  channelId: string;
-  messageId?: string;
-  scheduleId?: string;
-  authorId?: string;
-  authorName?: string;
-  messageCreatedAt?: string;
-  sendReport: (text: string) => Promise<WorkflowSentReport | void>;
-  bindSession?: (sessionId: string, reason: string) => Promise<void> | void;
-  setPhase?: (phase: WorkflowPhase) => Promise<void> | void;
-}
-
-function createWorkflowReactionReporter(message: Message): {
-  setPhase: (phase: WorkflowPhase) => Promise<void>;
-  clear: () => Promise<void>;
-} {
-  const phaseEmojis: Record<WorkflowPhase, string> = {
-    thinking: '🧠',
-    tool_use: '🔧',
-    text: '✍️',
-  };
-  let started = false;
-  let currentPhaseEmoji: string | null = null;
-
-  const removeReaction = async (emoji: string) => {
-    await message.reactions.cache
-      .find((r) => r.emoji.name === emoji)
-      ?.users.remove(message.client.user?.id)
-      .catch(() => {});
-  };
-
-  return {
-    setPhase: async (phase: WorkflowPhase) => {
-      const emoji = phaseEmojis[phase];
-      if (!started) {
-        started = true;
-        await message.react('👀').catch(() => {});
-      }
-      if (emoji === currentPhaseEmoji) return;
-      if (currentPhaseEmoji) await removeReaction(currentPhaseEmoji);
-      currentPhaseEmoji = emoji;
-      await message.react(emoji).catch(() => {});
-    },
-    clear: async () => {
-      for (const emoji of ['👀', '🧠', '🔧', '✍️']) {
-        await removeReaction(emoji);
-      }
-      started = false;
-      currentPhaseEmoji = null;
-    },
-  };
-}
-
-function sentMessageReport(sent: Message): WorkflowSentReport {
-  return {
-    messageId: sent.id,
-    channelId: sent.channel.id,
-    authorId: sent.author.id,
-    authorName: sent.author.username,
-    createdAt: sent.createdAt.toISOString(),
-  };
-}
-
-function buildChannelWorkflowReportSender(
-  channel: { send: (content: string) => Promise<Message> },
-  onText?: (text: string) => void
-): (text: string) => Promise<WorkflowSentReport> {
-  return async (text: string) => {
-    onText?.(text);
-    const chunks = chunkDiscordMessage(text, DISCORD_SAFE_LENGTH);
-    let firstSent: Message | undefined;
-    for (const chunk of chunks) {
-      const sent = await channel.send(chunk);
-      firstSent ??= sent;
-    }
-    if (!firstSent) firstSent = await channel.send('✅');
-    return sentMessageReport(firstSent);
-  };
-}
-
-async function runDirectWorkflow(
-  prompt: string,
-  context: DirectWorkflowContext,
-  options: { handleApprovals?: boolean } = {}
-): Promise<boolean> {
-  const handleApprovals = options.handleApprovals ?? true;
-
-  if (handleApprovals) {
-    const handledSelfTweetApproval = await handleSelfTweetApproval(prompt, {
-      ...context,
-      setPhase: context.setPhase,
-    });
-    if (handledSelfTweetApproval) return true;
-
-    const handledMentionReactionApproval = await handleMentionReactionApproval(prompt, {
-      ...context,
-      setPhase: context.setPhase,
-    });
-    if (handledMentionReactionApproval) return true;
-  }
-
-  if (isSelfTweetWorkflowPrompt(prompt)) {
-    await runSelfTweetWorkflow({
-      ...context,
-      setPhase: context.setPhase,
-      requestedSourceMode: parseSelfTweetSourceMode(prompt),
-    });
-    return true;
-  }
-
-  if (isMentionReactionWorkflowPrompt(prompt)) {
-    await runMentionReactionWorkflow({
-      ...context,
-      setPhase: context.setPhase,
-    });
-    return true;
-  }
-
-  if (isHashtagReactionWorkflowPrompt(prompt)) {
-    await runHashtagReactionWorkflow({
-      ...context,
-      setPhase: context.setPhase,
-    });
-    return true;
-  }
-
-  if (isElythWorkflowPrompt(prompt)) {
-    if (areWorldWorkflowsDisabled()) {
-      await context.sendReport(
-        'ELYTH workflow is disabled in xangi. Use nikechan-hermes Another World runtime.'
-      );
-      return true;
-    }
-    await runElythWorkflow({
-      messageId: context.messageId,
-      channelId: context.channelId,
-      authorId: context.authorId,
-      authorName: context.authorName,
-      messageCreatedAt: context.messageCreatedAt,
-      sendReport: context.sendReport,
-      bindSession: context.bindSession,
-    });
-    return true;
-  }
-
-  return false;
-}
+import {
+  buildXThreadPrompt,
+  isXRuntimeAvailable,
+  isXThreadParent,
+} from './lib/x-approval-router.js';
 
 async function main() {
   const config = loadConfig();
@@ -682,7 +475,11 @@ async function main() {
       `[xangi:debug] MessageCreate: msgId=${message.id}, channelId=${message.channel.id}, channelType=${message.channel.type}, parentId=${'parentId' in message.channel ? message.channel.parentId : 'N/A'}, content="${message.content.slice(0, 50)}", isMentioned=${isMentioned}, isAutoReply=${isAutoReplyChannel}`
     );
 
-    if (isAutoReplyChannel && isIgnoredAutoReplyThread) {
+    // Xチャンネル配下のスレッド（候補の承認・修正、報告への返信）は、
+    // X運用CLIが置かれている環境でだけ受け取る
+    const isXThread = isXThreadParent(parentId) && isXRuntimeAvailable();
+
+    if (isAutoReplyChannel && isIgnoredAutoReplyThread && !isXThread) {
       console.log(
         `[xangi:debug] Skip ignored auto-reply thread: msgId=${message.id}, channelId=${message.channel.id}, parentId=${parentId}`
       );
@@ -749,7 +546,13 @@ async function main() {
     const workflowPrompt = prompt;
 
     const threadContext = await fetchThreadContext(message, config.timezone);
-    if (threadContext) {
+    if (isXThread) {
+      const xThread = buildXThreadPrompt(message.channel.id, workflowPrompt, { threadContext });
+      prompt = xThread.prompt;
+      console.log(
+        `[xangi] Routed X thread ${message.channel.id} as ${xThread.kind} (msgId=${message.id})`
+      );
+    } else if (threadContext) {
       prompt = `${threadContext}\n\n## ユーザーの最新メッセージ\n${prompt}`;
     }
 
@@ -779,64 +582,11 @@ async function main() {
     const prev = channelQueues.get(channelId) ?? Promise.resolve();
     const task = prev.then(async () => {
       try {
-        // チャンネルに紐づくスキルのSKILL.mdを前置注入
+        // チャンネルに紐づくスキルのSKILL.mdを前置注入（Xスレッドには注入しない）
         const channelSkillName = config.discord.channelSkills?.[channelId];
-        const sendWorkflowReport = buildDiscordReportSender(
-          client,
-          message,
-          config.discord.channelReports?.[channelId]
-        );
-        const bindWorkflowSession = async (sessionId: string, reason: string) => {
-          setSession(channelId, sessionId);
-          console.log(
-            `[xangi] Bound workflow session ${sessionId.slice(0, 8)}... to channel ${channelId} (${reason})`
-          );
-        };
-        const workflowReactions = createWorkflowReactionReporter(message);
-        const withWorkflowReactions = async <T>(fn: () => Promise<T>): Promise<T> => {
-          try {
-            return await fn();
-          } finally {
-            await workflowReactions.clear();
-          }
-        };
-
-        const handledDirectWorkflow = await withWorkflowReactions(() =>
-          runDirectWorkflow(workflowPrompt, {
-            messageId: message.id,
-            channelId: message.channel.id,
-            authorId: message.author.id,
-            authorName: message.author.username,
-            messageCreatedAt: message.createdAt.toISOString(),
-            sendReport: sendWorkflowReport,
-            bindSession: bindWorkflowSession,
-            setPhase: workflowReactions.setPhase,
-          })
-        );
-        if (handledDirectWorkflow) return;
-
-        // karakuri-worldチャンネルはワークフローで処理（LLMセッションを使わない）
-        if (channelSkillName === 'karakuri-world') {
-          if (areWorldWorkflowsDisabled()) {
-            await message.reply(
-              'karakuri workflow is disabled in xangi. Use nikechan-hermes Another World runtime.'
-            );
-            return;
-          }
-          await runKarakuriWorkflow(prompt, {
-            messageId: message.id,
-            channelId: message.channel.id,
-            authorId: message.author.id,
-            authorName: message.author.username,
-            messageCreatedAt: message.createdAt.toISOString(),
-            sendReport: sendWorkflowReport,
-          });
-          return;
-        }
-
         const extraEnvOverrides: Record<string, string> = {};
 
-        if (channelSkillName) {
+        if (channelSkillName && !isXThread) {
           const skill = skills.find((s) => s.name === channelSkillName);
           if (skill && existsSync(skill.path)) {
             const skillContent = readFileSync(skill.path, 'utf-8');
@@ -845,7 +595,9 @@ async function main() {
           }
         }
 
-        const memoryRecallContext = await buildMemoryRecallContext(workflowPrompt, { workdir });
+        const memoryRecallContext = isXThread
+          ? null
+          : await buildMemoryRecallContext(workflowPrompt, { workdir });
         if (memoryRecallContext) {
           prompt = `${memoryRecallContext}\n\n---\n\n${prompt}`;
           console.log(`[xangi] Injected memory recall context for channel ${channelId}`);
@@ -1034,34 +786,6 @@ async function main() {
           if (!threadId) return text;
           return text.replace(new RegExp(`<#${channelId}>`, 'g'), `<#${threadId}>`);
         };
-        const bindWorkflowSession = async (sessionId: string, reason: string) => {
-          const effectiveChannelId = threadId || channelId;
-          setSession(effectiveChannelId, sessionId);
-          console.log(
-            `[scheduler] Bound workflow session ${sessionId.slice(0, 8)}... to channel ${effectiveChannelId} (${reason})`
-          );
-        };
-
-        let workflowReportText = '';
-        const handledDirectWorkflow = await runDirectWorkflow(
-          prompt,
-          {
-            channelId: threadId || channelId,
-            scheduleId: options?.scheduleId,
-            authorName: 'scheduler',
-            messageCreatedAt: new Date().toISOString(),
-            bindSession: bindWorkflowSession,
-            sendReport: buildChannelWorkflowReportSender(
-              channel as { send: (content: string) => Promise<Message> },
-              (text) => {
-                workflowReportText = text;
-              }
-            ),
-          },
-          { handleApprovals: false }
-        );
-        if (handledDirectWorkflow) return workflowReportText;
-
         // プロンプト内の !discord send コマンドを先に直接実行
         const promptCommands = extractDiscordSendFromPrompt(prompt);
         for (const cmd of promptCommands.commands) {

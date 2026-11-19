@@ -131,19 +131,18 @@ pm2 logs xangi     # ログ確認
 | `MAX_PROCESSES` | 同時実行プロセス数の上限 | `10` |
 | `IDLE_TIMEOUT_MS` | アイドルプロセスの自動終了時間（ミリ秒） | `1800000`（30分） |
 | `GH_TOKEN` | GitHub CLI用トークン | - |
-| `NIKECHAN_X_WORKER_SELF_TWEET_ENABLED` | `/self-tweet` を独立 `nikechan-x-worker` 経由にする | `false` |
-| `NIKECHAN_X_WORKER_URL` | worker HTTP endpoint。設定時は `POST /workflow` を使う | - |
-| `NIKECHAN_X_WORKER_COMMAND` | worker CLI command。HTTP未設定時に使う | `nikechan-x-worker` |
-| `NIKECHAN_X_WORKER_ARGS` | worker CLI args。`{json}` が WorkflowRequest に置換される | `run --json {json}` |
-| `NIKECHAN_X_WORKER_CWD` | worker CLI の作業ディレクトリ | xangi の cwd |
 
 全ての環境変数は [設計ドキュメント](docs/design.md) を参照してください。
 
-### nikechan-x-worker self-tweet
+### X運用の承認スレッド
 
-`NIKECHAN_X_WORKER_SELF_TWEET_ENABLED=true` の場合、xangi は Discord/scheduler/approval UI を担当し、`/self-tweet` の案生成と修正は `nikechan-x-worker` に委譲します。
+`/opt/nikechan-x` にX運用CLI（`scripts/nikechan-x.mjs`）が置かれている環境では、Xチャンネル配下のスレッドへの返信を受け取り、CLIの承認待ちデータと突き合わせてCodexへ渡します（`src/lib/x-approval-router.ts`）。CLIがない環境では、これらのスレッドは無視します。
 
-Discord から一回だけ情報源タイプを固定する場合は `/self-tweet news` のように指定できます。対応値は `presence`, `daily_life`, `tech`, `news`, `memory`, `random` です。
+| 環境変数 | 説明 | デフォルト |
+|---|---|---|
+| `NIKECHAN_X_PATH` | composeでコンテナの `/opt/nikechan-x` にマウントするホスト側のパス | 空ディレクトリ（X連携なし） |
+| `NIKECHAN_X_ROOT` | コンテナ内のX運用CLIの場所 | `/opt/nikechan-x` |
+| `NIKECHAN_X_DISCORD_CHANNEL_ID` | X用の親チャンネルID | `1477766217673478234` |
 
 Nikechan運用上の詳細は親repoの `docs/twitter-posting-flow.md` を正本とします。
 

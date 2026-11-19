@@ -5,12 +5,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-export type NikechanCoreProfileId =
-  | 'xangi-assistant'
-  | 'xangi-social'
-  | 'xangi-world-elyth'
-  | 'xangi-world-karakuri'
-  | 'xangi-ops';
+export type NikechanCoreProfileId = 'xangi-assistant' | 'xangi-social' | 'xangi-ops';
 
 interface ProfileExpectation {
   role: string;
@@ -20,8 +15,6 @@ interface ProfileExpectation {
 const PROFILE_EXPECTATIONS: Record<NikechanCoreProfileId, ProfileExpectation> = {
   'xangi-assistant': { role: 'assistant', surface: 'discord' },
   'xangi-social': { role: 'social', surface: 'x' },
-  'xangi-world-elyth': { role: 'world', surface: 'elyth' },
-  'xangi-world-karakuri': { role: 'world', surface: 'karakuri' },
   'xangi-ops': { role: 'assistant', surface: 'discord' },
 };
 

@@ -12,6 +12,8 @@ x-common: &common
     - grok-data:/home/node/.grok
     # ワークスペース（nikechanリポジトリ全体）
     - ${WORKSPACE_PATH:-..}:/workspace
+    # X運用CLI・state・X認証情報（VPSでは /opt/nikechan-x。未設定の環境では空ディレクトリになり、X連携は無効）
+    - ${NIKECHAN_X_PATH:-../tmp/nikechan-x-unmounted}:/opt/nikechan-x
     # ローカル専用スキル（l-*）を空ボリュームで隠す
     - /workspace/.claude/skills/l-crypto-check
     - /workspace/.claude/skills/l-license-checker

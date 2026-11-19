@@ -32,7 +32,7 @@ const MEMORY_RECALL_PATTERN =
   /(覚えて(?:る|ます|いる)?|記憶|思い出|前に|以前|この前|昔|過去|話(?:した|してた|題にした)|したっけ|あったっけ|決めたっけ|なんだっけ|どうなったっけ|結論(?:は|どう)|方針(?:は|どう))/u;
 
 const COMMAND_PREFIX_PATTERN =
-  /^[/!](?:self-tweet|mention-reaction|hashtag-reaction|elyth-activity|karakuri|schedule|discord|skip|new|stop|restart|settings|skills|skill|compact)(?:\s|$)/u;
+  /^[/!](?:schedule|discord|skip|new|stop|restart|settings|skills|skill|compact)(?:\s|$)/u;
 
 export function shouldRecallMemory(prompt: string): boolean {
   const text = normalizePrompt(prompt);
