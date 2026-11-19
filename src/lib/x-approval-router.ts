@@ -278,7 +278,7 @@ export function buildXReportThreadPrompt(
 ${runtimePreamble(root)}
 
 ## 判断方針
-- 質問・確認なら、スレッドの内容やCLIの読み取り系コマンド（\`state\`、\`pending\`、\`mention-pending\`、\`doctor\`）で確かめて答えてください。
+- 質問・確認なら、スレッドの内容やCLIの読み取り系コマンド（\`state\`、\`mention-pending\`、\`doctor\`）で確かめて答えてください。
 - X上の操作（投稿・返信・引用・RT・取り消し）は、マスターがこのthreadで対象と操作を明示した場合だけ、CLI経由で実行してください。曖昧な場合は実行せず、何をするかを確認してください。
 
 ## Discordへの返答スタイル
