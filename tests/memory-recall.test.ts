@@ -9,7 +9,7 @@ describe('memory recall', () => {
   });
 
   it('does not trigger for workflow commands', () => {
-    expect(shouldRecallMemory('/self-tweet memory')).toBe(false);
+    expect(shouldRecallMemory('/skip memory')).toBe(false);
     expect(shouldRecallMemory('!schedule list')).toBe(false);
   });
 

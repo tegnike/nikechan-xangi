@@ -151,18 +151,6 @@ AIがDiscord操作を実行するためのコマンドです。
 !discord delete https://discord.com/channels/111/222/333
 ```
 
-## X self-tweet
-
-`NIKECHAN_X_WORKER_SELF_TWEET_ENABLED=true` の環境では、`/self-tweet` は `nikechan-x-worker` 経由でツイート候補を生成し、Discord上で承認・修正・見送りできます。
-
-```
-/self-tweet
-/self-tweet presence
-/self-tweet news
-```
-
-情報源タイプを指定できるのは手動実行1回分です。対応値は `presence`, `daily_life`, `tech`, `news`, `memory`, `random`。詳細な動作、修正再生成時の引き継ぎ、投稿可否、source modeごとの運用方針は親repo `nikechan/docs/twitter-posting-flow.md` を参照してください。
-
 ## 許可確認のスキップ
 
 デフォルトではAIはファイル作成やコマンド実行時に許可確認を求めます。
